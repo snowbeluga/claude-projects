@@ -1,0 +1,957 @@
+#!/usr/bin/env bash
+# claude-projects — a project picker for Claude Code.
+#   claude-projects            open the picker (prints "<key>\t<path>" for the shell wrapper)
+#   claude-projects setup      choose which folders to scan, editor, privacy
+#   claude-projects doctor     check everything and explain what's wrong
+#   claude-projects update     pull the latest version (git installs)
+#   claude-projects list | ignore | unignore | ignored   plain-text commands (see: help)
+#
+# Written for bash 3.2+ (the macOS default) and GNU/BSD userlands. Requires fzf; jq optional.
+
+CP_VERSION="1.0.0"
+TAB=$(printf '\t')
+
+# ---------------------------------------------------------------- paths
+resolve_self() {
+  local p="$0" d
+  while [ -L "$p" ]; do
+    d=$(cd -P "$(dirname "$p")" && pwd)
+    p=$(readlink "$p")
+    case "$p" in /*) ;; *) p="$d/$p" ;; esac
+  done
+  d=$(cd -P "$(dirname "$p")" && pwd)
+  printf '%s/%s' "$d" "$(basename "$p")"
+}
+SELF=$(resolve_self)
+CP_HOME=$(dirname "$(dirname "$SELF")")
+CONF_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/claude-projects"
+CONF="$CONF_DIR/config"
+IGNORE_FILE="$CONF_DIR/ignore"
+CLAUDE_HOME="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+SESS_ROOT="$CLAUDE_HOME/projects"
+IS_MAC=0; [ "$(uname -s)" = "Darwin" ] && IS_MAC=1
+
+# ---------------------------------------------------------------- config
+CP_KEYS="CP_ROOTS CP_DEPTH CP_INCLUDE_NONGIT CP_EDITOR CP_HIDE_PROMPTS CP_WRAP_CLAUDE CP_WORDS CP_THEME CP_ASCII CP_FZF_OPTS CP_PARALLEL"
+
+load_config() {
+  local k v
+  # Remember anything exported in the environment so it overrides the file.
+  for k in $CP_KEYS; do
+    eval "v=\${$k+x}"
+    if [ "$v" = x ]; then eval "_ENV_$k=\$$k; _HAS_$k=1"; fi
+  done
+  CP_ROOTS=""; CP_DEPTH=3; CP_INCLUDE_NONGIT=yes; CP_EDITOR=""; CP_HIDE_PROMPTS=no; CP_WRAP_CLAUDE=yes
+  CP_WORDS="projects"; CP_THEME=auto; CP_ASCII=auto; CP_FZF_OPTS=""; CP_PARALLEL=8
+  # shellcheck disable=SC1090
+  [ -f "$CONF" ] && . "$CONF"
+  for k in $CP_KEYS; do
+    eval "v=\${_HAS_$k:-}"
+    [ "$v" = 1 ] && eval "$k=\$_ENV_$k"
+  done
+  # v0 compatibility (the hand-installed version used this variable)
+  [ -z "$CP_ROOTS" ] && [ -n "${CLAUDE_PROJECT_ROOTS:-}" ] && CP_ROOTS=$CLAUDE_PROJECT_ROOTS
+  case "$CP_DEPTH" in ''|*[!0-9]*) CP_DEPTH=3 ;; esac
+  case "$CP_PARALLEL" in ''|*[!0-9]*|0) CP_PARALLEL=8 ;; esac
+}
+
+# ---------------------------------------------------------------- style
+setup_style() {
+  local utf=0 bg
+  case "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}" in *[Uu][Tt][Ff]-8*|*[Uu][Tt][Ff]8*) utf=1 ;; esac
+  case "$CP_ASCII" in yes) utf=0 ;; no) utf=1 ;; esac
+  if [ $utf = 1 ]; then
+    S_SPARK="✻"; S_RUN="▶"; S_DIRTY="●"; S_PROMPT="❯"; S_PTR="▌"; S_ITEM="›"; S_GIT="⎇"; S_OK="✓"; S_BAD="✗"; S_DOT="·"; S_ENTER="↵"
+    S_UP="↑"; S_DOWN="↓"; S_DASH="—"; S_ELL="…"; S_DIR="▢"; UNICODE=1
+  else
+    S_SPARK="*"; S_RUN=">"; S_DIRTY="+"; S_PROMPT=">"; S_PTR=">"; S_ITEM="-"; S_GIT="git"; S_OK="ok"; S_BAD="XX"; S_DOT="|"; S_ENTER="enter"
+    S_UP="^"; S_DOWN="v"; S_DASH="-"; S_ELL="..."; S_DIR="[]"; UNICODE=0
+  fi
+
+  THEME=$CP_THEME
+  if [ "$THEME" = auto ]; then
+    THEME=dark
+    if [ -n "${COLORFGBG:-}" ]; then
+      bg=${COLORFGBG##*;}
+      case "$bg" in 7|9|1[0-5]) THEME=light ;; esac
+    fi
+  fi
+  [ -n "${NO_COLOR:-}" ] && THEME=none
+
+  local E; E=$(printf '\033')
+  if [ "$THEME" = none ]; then
+    R=""; B=""; O1=""; O2=""; O3=""; GRN=""; YEL=""; BLU=""; GRY=""; RED=""
+    FZF_COLORS="bw"; GIT_COLOR=never
+  elif [ "$THEME" = light ]; then
+    R="$E[0m"; B="$E[1m"
+    O1="$E[38;5;173m"; O2="$E[38;5;166m"; O3="$E[38;5;130m"
+    GRN="$E[38;5;28m"; YEL="$E[38;5;136m"; BLU="$E[38;5;25m"; GRY="$E[38;5;242m"; RED="$E[38;5;160m"
+    FZF_COLORS="light,bg+:#f1e4dc,fg+:#1a1a1a,hl:#c15f3c,hl+:#a24a2a,prompt:#c15f3c,pointer:#c15f3c,border:#d8c4b8,info:#8a7a72,spinner:#c15f3c,marker:#c15f3c"
+    GIT_COLOR=always
+  else
+    R="$E[0m"; B="$E[1m"
+    O1="$E[38;5;216m"; O2="$E[38;5;209m"; O3="$E[38;5;173m"
+    GRN="$E[38;5;114m"; YEL="$E[38;5;221m"; BLU="$E[38;5;110m"; GRY="$E[38;5;244m"; RED="$E[38;5;203m"
+    FZF_COLORS="dark,bg+:#2b2320,fg+:#ffffff,hl:#d97757,hl+:#ff9a76,prompt:#d97757,pointer:#d97757,border:#5c4a42,info:#8a7a72,spinner:#d97757,marker:#d97757"
+    GIT_COLOR=always
+  fi
+}
+
+# Plain output (no colours) when stdout isn't a terminal, so Claude and scripts can read it.
+plain_if_piped() { [ -t 1 ] || { NO_COLOR=1; setup_style; }; }
+
+say()  { printf '%s\n' "$*" >&2; }
+die()  { printf '%sclaude-projects:%s %s\n' "$RED" "$R" "$*" >&2; exit 2; }
+
+# ---------------------------------------------------------------- helpers
+mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0; }
+newest_mtime() { # folder -> mtime of the folder or its newest top-level entry, whichever is later
+  local d=$1 f t1 t2
+  t1=$(mtime "$d"); f=$(ls -t "$d" 2>/dev/null | head -1)
+  t2=0; [ -n "$f" ] && t2=$(mtime "$d/$f")
+  [ "$t2" -gt "$t1" ] && t1=$t2
+  printf '%s' "$t1"
+}
+NOW=$(date +%s)
+
+ago() {
+  local t=${1:-0} s
+  case "$t" in ''|*[!0-9]*) t=0 ;; esac
+  [ "$t" -le 0 ] && { printf '%s' "$S_DASH"; return; }
+  s=$(( NOW - t ))
+  if   [ $s -lt 60 ];      then printf 'just now'
+  elif [ $s -lt 3600 ];    then printf '%sm ago' $(( s / 60 ))
+  elif [ $s -lt 86400 ];   then printf '%sh ago' $(( s / 3600 ))
+  elif [ $s -lt 604800 ];  then printf '%sd ago' $(( s / 86400 ))
+  elif [ $s -lt 2592000 ]; then printf '%sw ago' $(( s / 604800 ))
+  else                          printf '%smo ago' $(( s / 2592000 ))
+  fi
+}
+
+expand_path() {
+  case "$1" in
+    "~")   printf '%s' "$HOME" ;;
+    "~/"*) printf '%s/%s' "$HOME" "${1#\~/}" ;;
+    *)     printf '%s' "$1" ;;
+  esac
+}
+shortpath() { case "$1" in "$HOME") printf '~' ;; "$HOME"/*) printf '~%s' "${1#"$HOME"}" ;; *) printf '%s' "$1" ;; esac; }
+lc() { if [ $IS_MAC = 1 ]; then printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; else printf '%s' "$1"; fi; }
+physical() { (cd -P "$1" 2>/dev/null && pwd) || printf '%s' "$1"; }
+
+# git, safely: never take optional locks (Claude may be running git in the same repo),
+# never run fsmonitor or hooks from a repo's own config.
+g() { local d=$1; shift; GIT_OPTIONAL_LOCKS=0 git -C "$d" -c core.fsmonitor=false -c core.hooksPath=/dev/null "$@"; }
+
+ver_ge() { # ver_ge 0.42.0 0.38  -> true if $1 >= $2
+  local a b i x y
+  a=$(printf '%s' "$1" | sed 's/[^0-9.].*//'); b=$2
+  for i in 1 2 3; do
+    x=$(printf '%s' "$a" | cut -d. -f$i); y=$(printf '%s' "$b" | cut -d. -f$i)
+    x=${x:-0}; y=${y:-0}
+    [ "$x" -gt "$y" ] && return 0
+    [ "$x" -lt "$y" ] && return 1
+  done
+  return 0
+}
+
+fzf_version() { fzf --version 2>/dev/null | awk '{print $1}'; }
+# Probe an option: fzf exits 2 on unknown options, 1 on "no match".
+fzf_has() { printf '' | FZF_DEFAULT_OPTS='' FZF_DEFAULT_OPTS_FILE='' fzf --filter=x "$@" >/dev/null 2>&1; [ $? -ne 2 ]; }
+need_fzf() {
+  command -v fzf >/dev/null 2>&1 || die "fzf is required. Install it with:  brew install fzf   (then run: claude-projects doctor)"
+}
+
+clipboard_cmd() {
+  if command -v pbcopy >/dev/null 2>&1; then echo pbcopy
+  elif [ -n "${WAYLAND_DISPLAY:-}" ] && command -v wl-copy >/dev/null 2>&1; then echo wl-copy
+  elif command -v xclip >/dev/null 2>&1; then echo "xclip -selection clipboard"
+  elif command -v xsel >/dev/null 2>&1; then echo "xsel --clipboard --input"
+  elif command -v clip.exe >/dev/null 2>&1; then echo clip.exe
+  fi
+}
+
+GUI_EDITORS="cursor code zed subl windsurf idea webstorm pycharm goland"
+detect_editor() {
+  local e
+  for e in $GUI_EDITORS; do command -v "$e" >/dev/null 2>&1 && { echo "$e"; return; }; done
+  [ -n "${VISUAL:-}" ] && { echo "$VISUAL"; return; }
+  [ -n "${EDITOR:-}" ] && { echo "$EDITOR"; return; }
+  [ $IS_MAC = 1 ] && echo open
+}
+editor_is_gui() { local first=${1%% *} e; first=${first##*/}; for e in $GUI_EDITORS open; do [ "$first" = "$e" ] && return 0; done; return 1; }
+
+# ---------------------------------------------------------------- running sessions
+running_cwds() {
+  local pids p
+  pids=$(ps -A -o pid= -o args= 2>/dev/null | awk '
+    { a=$2; sub(/.*\//, "", a)
+      if (a == "claude") print $1
+      else if ((a == "node" || a == "bun") && ($0 ~ /@anthropic-ai\/claude-code/ || $0 ~ /claude-code\/cli/)) print $1 }')
+  [ -z "$pids" ] && return 0
+  if [ -d /proc ] && [ -e "/proc/$$/cwd" ]; then
+    for p in $pids; do readlink "/proc/$p/cwd" 2>/dev/null; done
+  elif command -v lsof >/dev/null 2>&1; then
+    lsof -a -p "$(printf '%s' "$pids" | tr '\n' ',' | sed 's/,$//')" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p'
+  fi
+}
+is_running() { # $1 repo ; uses CP_RUNNING (newline-separated cwds)
+  [ -z "${CP_RUNNING:-}" ] && return 1
+  local r rp c
+  r=$(lc "$1"); rp=$(lc "$(physical "$1")")
+  while IFS= read -r c; do
+    [ -z "$c" ] && continue
+    c=$(lc "$c")
+    case "$c" in "$r"|"$r"/*|"$rp"|"$rp"/*) return 0 ;; esac
+  done <<EOF
+$CP_RUNNING
+EOF
+  return 1
+}
+
+# ---------------------------------------------------------------- Claude session index
+# One line per ~/.claude/projects/<dir>: "mtime \t cwd \t latest-file \t session-count".
+# cwd is read from the transcript itself (authoritative); if the format ever changes we
+# fall back to Claude's folder-name encoding so matching degrades instead of breaking.
+build_index() {
+  [ -d "$SESS_ROOT" ] || return 0
+  local d f n cwd
+  for d in "$SESS_ROOT"/*/; do
+    d=${d%/}
+    f=$(ls -t "$d"/*.jsonl 2>/dev/null | head -1)
+    [ -n "$f" ] || continue
+    n=$(ls "$d"/*.jsonl 2>/dev/null | wc -l | tr -d ' ')
+    cwd=$(grep -m1 -o '"cwd": *"[^"]*"' "$f" 2>/dev/null | head -1 | sed 's/^"cwd": *"//; s/"$//')
+    [ -z "$cwd" ] && cwd="?enc:${d##*/}"
+    printf '%s\t%s\t%s\t%s\n' "$(mtime "$f")" "$cwd" "$f" "$n"
+  done
+}
+encode_path() { printf '%s' "$1" | sed 's/[^a-zA-Z0-9]/-/g'; }
+
+match_sessions() { # $1 repo -> "mtime \t file \t count"
+  local r=$1 rp
+  [ -n "${CP_INDEX:-}" ] && [ -s "$CP_INDEX" ] || { printf '0\t\t0\n'; return; }
+  rp=$(physical "$r")
+  awk -F'\t' -v r="$r" -v rp="$rp" -v e1="?enc:$(encode_path "$r")" -v e2="?enc:$(encode_path "$rp")" -v ci="$IS_MAC" '
+    function L(s) { return ci ? tolower(s) : s }
+    BEGIN { R=L(r); RP=L(rp); E1=L(e1); E2=L(e2); best=0; cnt=0; file="" }
+    { c=L($2)
+      if (c==R || c==RP || index(c, R "/")==1 || index(c, RP "/")==1 || c==E1 || c==E2) {
+        cnt += $4; if ($1+0 > best) { best=$1+0; file=$3 } } }
+    END { printf "%s\t%s\t%s\n", best, file, cnt }' "$CP_INDEX"
+}
+
+# ---------------------------------------------------------------- repo discovery
+find_repos() {
+  local IFS=: root
+  for root in $CP_ROOTS; do
+    root=$(expand_path "$root")
+    [ -d "$root" ] || continue
+    find "$root" -maxdepth $(( CP_DEPTH + 1 )) \
+      \( -name node_modules -o -name .venv -o -name venv -o -name vendor -o -name .terraform \
+         -o -name Pods -o -name .cache -o -name Library -o -name .Trash -o -name .build -o -name dist \) -prune \
+      -o -name .git -type d -print -prune 2>/dev/null
+  done | sed 's|/\.git$||' | LC_ALL=C sort -u | awk '
+    { for (k in kept) if (index($0, k "/") == 1) next   # drop repos nested inside other repos
+      kept[$0]=1; print }'
+}
+
+PRUNE_NAMES="node_modules .venv venv vendor .terraform Pods .cache Library .Trash .build dist"
+
+# Every project under CP_ROOTS, before ignore rules: "kind \t path", kind = git | dir.
+# Non-git projects are (a) folders directly inside a root and (b) folders under a root where
+# Claude has been run. A folder that only holds repos (e.g. ~/code/my-org) isn't a project itself.
+find_all_projects() {
+  local repos root roots="" IFS_SAVE=$IFS c
+  repos=$(find_repos)
+  [ -n "$repos" ] && printf '%s\n' "$repos" | sed "s/^/git$TAB/"
+  [ "$CP_INCLUDE_NONGIT" = yes ] || return 0
+  IFS=:; for root in $CP_ROOTS; do IFS=$IFS_SAVE
+    root=$(expand_path "$root"); roots="$roots:${root%/}"; done; IFS=$IFS_SAVE
+  {
+    IFS=:; for root in $roots; do IFS=$IFS_SAVE
+      [ -n "$root" ] && [ -d "$root" ] && find "$root" -mindepth 1 -maxdepth 1 -type d ! -name '.*' 2>/dev/null
+    done; IFS=$IFS_SAVE
+    session_cwds | while IFS= read -r c; do
+      [ -d "$c" ] && printf '%s\n' "$c"
+    done
+  } | LC_ALL=C sort -u | awk -v roots="$roots" -v prune=" $PRUNE_NAMES " '
+    FNR == NR { if ($0 != "") repo[$0] = 1; next }
+    BEGIN { n = split(roots, rs, ":"); for (i = 1; i <= n; i++) if (rs[i] != "") root[rs[i]] = 1 }
+    { p = $0; base = p; sub(/.*\//, "", base)
+      if (p in root || p in repo || index(prune, " " base " ")) next
+      under = 0; for (r in root) if (index(p, r "/") == 1) under = 1
+      if (!under) next
+      for (r in repo) if (index(p, r "/") == 1 || index(r, p "/") == 1) next   # inside a repo, or holds repos
+      for (k in kept) if (index(p, k "/") == 1) next                           # inside another folder project
+      kept[p] = 1; printf "dir\t%s\n", p }' <(printf '%s\n' "$repos") -
+}
+session_cwds() { # cwds Claude has been run in (from the index, or built on the fly)
+  if [ -n "${CP_INDEX:-}" ] && [ -s "$CP_INDEX" ]; then cut -f2 "$CP_INDEX"; else build_index | cut -f2; fi | grep -v '^?enc:'
+}
+
+# ---------------------------------------------------------------- ignore rules
+# ~/.config/claude-projects/ignore, one rule per line, # for comments:
+#   ~/code/old-stuff     a folder (and everything inside it)
+#   scratch              any project with this folder name
+#   *-backups            glob on the folder name;   ~/code/archive-*   glob on the full path
+load_ignores() {
+  IGN_RULES=""
+  [ -f "$IGNORE_FILE" ] && IGN_RULES=$(sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e '/^#/d' -e '/^$/d' "$IGNORE_FILE")
+  [ $IS_MAC = 1 ] && shopt -s nocasematch   # macOS folders are case-insensitive
+}
+rule_matches() { # $1 rule, $2 path
+  local r=$1 p=$2
+  case "$r" in
+    /*|"~"*) r=$(expand_path "$r"); r=${r%/}
+             # shellcheck disable=SC2254
+             case "$p" in $r|$r/*) return 0 ;; esac ;;
+    */*)     # shellcheck disable=SC2254
+             case "$p" in */$r|*/$r/*) return 0 ;; esac ;;
+    *)       # shellcheck disable=SC2254
+             case "${p##*/}" in $r) return 0 ;; esac ;;
+  esac
+  return 1
+}
+ignored_by() { # $1 path -> sets IGN_HIT to the first matching rule (empty if none)
+  local r
+  IGN_HIT=""
+  [ -n "$IGN_RULES" ] || return 1
+  while IFS= read -r r; do rule_matches "$r" "$1" && { IGN_HIT=$r; return 0; }; done <<EOF
+$IGN_RULES
+EOF
+  return 1
+}
+# stdin "kind \t path" -> visible ones ("kind \t path"), or with $1=hidden: "kind \t path \t rule"
+apply_ignores() {
+  local kind p
+  while IFS="$TAB" read -r kind p; do
+    [ -n "$p" ] || continue
+    if ignored_by "$p"; then [ "${1:-}" = hidden ] && printf '%s\t%s\t%s\n' "$kind" "$p" "$IGN_HIT"
+    else [ "${1:-}" = hidden ] || printf '%s\t%s\n' "$kind" "$p"; fi
+  done
+}
+find_projects() { load_ignores; find_all_projects | apply_ignores; }
+hidden_projects() { load_ignores; find_all_projects | apply_ignores hidden; }
+
+# One display row: "sortkey \t path \t pretty \t kind \t claude(yes|no) \t last-active"
+row() {
+  local repo=$1 name branch bcol dirty ct m st sf cnt ts spark mark kind claude=no
+  [ -n "$repo" ] && [ -d "$repo" ] || return 0
+  name=${repo##*/}
+  m=$(match_sessions "$repo")
+  st=$(printf '%s' "$m" | cut -f1); st=${st:-0}
+  dirty=" "
+  if [ -e "$repo/.git" ]; then
+    kind=git; bcol=$BLU
+    branch=$(g "$repo" symbolic-ref --short -q HEAD 2>/dev/null)
+    if [ -z "$branch" ]; then
+      branch=$(g "$repo" rev-parse --short HEAD 2>/dev/null)
+      branch="(${branch:-no commits})"
+    fi
+    [ -n "$(g "$repo" status --porcelain --untracked-files=no 2>/dev/null | head -1)" ] && dirty=$S_DIRTY
+    ct=$(g "$repo" log -1 --format=%ct 2>/dev/null); ct=${ct:-0}
+    # ✻ = your last activity here was through Claude (session newer than the last commit)
+    if [ "$st" -gt 0 ] && [ "$st" -ge "$ct" ]; then ts=$st; spark="$O2$S_SPARK$R"; else ts=$ct; spark=" "; fi
+  else
+    # No commits to compare against, so ✻ just means Claude has been used here.
+    kind=dir; bcol=$GRY; branch="no git"
+    ct=$(newest_mtime "$repo")
+    ts=$ct; [ "$st" -gt "$ts" ] && ts=$st
+    if [ "$st" -gt 0 ]; then spark="$O2$S_SPARK$R"; else spark=" "; fi
+  fi
+  [ "$st" -gt 0 ] && claude=yes
+  mark="  "; is_running "$repo" && mark="$GRN$S_RUN$R "
+  printf '%s\t%s\t%s%s%-26.26s%s %s%-22.22s%s %s%s%s %s%7s%s %s\t%s\t%s\t%s\n' \
+    "$ts" "$repo" "$mark" "$B" "$name" "$R" "$bcol" "$branch" "$R" "$YEL" "$dirty" "$R" "$GRY" "$(ago "$ts")" "$R" "$spark" \
+    "$kind" "$claude" "$(ago "$ts")"
+}
+
+make_tmp() {
+  CP_TMP=$(mktemp -d "${TMPDIR:-/tmp}/claude-projects.XXXXXX") || die "could not create a temp folder"
+  trap 'rm -rf "$CP_TMP"' EXIT
+  export CP_TMP
+}
+
+# Build the session index + running list in the *current* shell so fzf's preview inherits them.
+prepare_data() { # needs CP_TMP
+  export CP_INDEX="$CP_TMP/index"
+  build_index > "$CP_INDEX"
+  CP_RUNNING=$(running_cwds); export CP_RUNNING
+}
+list_rows() { # -> "path \t pretty \t kind \t claude \t last-active", most recent first
+  local repos; repos=$(find_projects | cut -f2)
+  [ -n "$repos" ] || return 0
+  printf '%s\n' "$repos" | tr '\n' '\0' | xargs -0 -n1 -P "$CP_PARALLEL" "$SELF" --row 2>/dev/null \
+    | sort -t "$TAB" -k1,1nr | cut -f2-
+}
+
+# ---------------------------------------------------------------- preview
+preview() {
+  local r=$1 m st sf cnt summ prompts ab changes br n
+  [ -d "$r" ] || { echo "Folder no longer exists: $r"; return; }
+  printf '%s%s%s\n%s%s%s\n' "$B$O2" "${r##*/}" "$R" "$GRY" "$(shortpath "$r")" "$R"
+  is_running "$r" && printf '%s%s Claude is running here now%s\n' "$GRN" "$S_RUN" "$R"
+  echo
+
+  m=$(match_sessions "$r")
+  st=$(printf '%s' "$m" | cut -f1); sf=$(printf '%s' "$m" | cut -f2); cnt=$(printf '%s' "$m" | cut -f3)
+  if [ "${st:-0}" -gt 0 ] && [ -f "$sf" ]; then
+    printf '%s%s CLAUDE%s  %slast session %s %s %s total%s\n' "$O2$B" "$S_SPARK" "$R" "$GRY" "$(ago "$st")" "$S_DOT" "$cnt" "$R"
+    summ=$(grep '"type": *"summary"' "$sf" 2>/dev/null | tail -1 | sed -n 's/.*"summary": *"\([^"]*\)".*/\1/p')
+    [ -n "$summ" ] && printf '  %s%s%s\n' "$B" "$summ" "$R"
+    if [ "$CP_HIDE_PROMPTS" = yes ]; then
+      printf '  %sprompts hidden (CP_HIDE_PROMPTS=yes)%s\n' "$GRY" "$R"
+    elif command -v jq >/dev/null 2>&1; then
+      prompts=$(tail -c 4000000 "$sf" 2>/dev/null | grep '"type": *"user"' | jq -rR '
+        fromjson? | select(.type=="user" and (.isMeta|not)) | .message.content
+        | if type=="string" then . else ([.[]? | select(.type?=="text") | .text] | join(" ")) end
+        | gsub("\\s+"; " ") | select(length > 0) | select(startswith("<") | not)
+        | if length > 110 then .[0:110] + "'"$S_ELL"'" else . end' 2>/dev/null | tail -5)
+      if [ -n "$prompts" ]; then
+        printf '  %sWhat you asked last time:%s\n' "$GRY" "$R"
+        printf '%s\n' "$prompts" | while IFS= read -r line; do printf '  %s%s%s %s\n' "$O3" "$S_ITEM" "$R" "$line"; done
+      else
+        printf '  %s(no readable prompts in the latest session)%s\n' "$GRY" "$R"
+      fi
+    else
+      printf '  %s(install jq to see your recent prompts: brew install jq)%s\n' "$GRY" "$R"
+    fi
+  else
+    printf '%s%s CLAUDE%s  %sno sessions yet%s\n' "$O2$B" "$S_SPARK" "$R" "$GRY" "$R"
+  fi
+
+  echo
+  if [ ! -e "$r/.git" ]; then
+    n=$(ls -A "$r" 2>/dev/null | grep -c .)
+    printf '%s%s FOLDER%s  %snot a git repo %s %s items%s\n' "$BLU$B" "$S_DIR" "$R" "$GRY" "$S_DOT" "$n" "$R"
+    ls -p "$r" 2>/dev/null | head -12 | sed 's/^/  /'
+    [ "$n" -gt 12 ] && printf '  %s%s and %s more%s\n' "$GRY" "$S_ELL" $(( n - 12 )) "$R"
+    return 0
+  fi
+  br=$(g "$r" symbolic-ref --short -q HEAD 2>/dev/null || g "$r" rev-parse --short HEAD 2>/dev/null)
+  ab=$(g "$r" rev-list --left-right --count '@{u}...HEAD' 2>/dev/null)
+  changes=$(g "$r" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+  printf '%s%s GIT%s  %s%s%s' "$BLU$B" "$S_GIT" "$R" "$BLU" "${br:-?}" "$R"
+  if [ -n "$ab" ]; then
+    set -- $ab
+    [ "${2:-0}" -gt 0 ] && printf '  %s%s%s%s' "$GRN" "$S_UP" "$2" "$R"
+    [ "${1:-0}" -gt 0 ] && printf '  %s%s%s%s' "$YEL" "$S_DOWN" "$1" "$R"
+  fi
+  if [ "${changes:-0}" -gt 0 ]; then printf '  %s%s changed%s\n' "$YEL" "$changes" "$R"; else printf '  %sclean%s\n' "$GRY" "$R"; fi
+  g "$r" -c color.status=$GIT_COLOR status -s 2>/dev/null | head -8 | sed 's/^/  /'
+  echo
+  printf '%sRecent commits%s\n' "$GRY" "$R"
+  g "$r" log -6 --color=$GIT_COLOR --format='  %C(244)%<(15,trunc)%cr%C(reset) %s' 2>/dev/null
+}
+
+# ---------------------------------------------------------------- header
+header() { # $1 total, $2 running, $3 hints, $4 hidden by ignore rules
+  local cols hid=""; cols=$(tput cols 2>/dev/null || echo 80)
+  if [ "$UNICODE" = 1 ] && [ "$cols" -ge 60 ]; then
+    printf '%s  ┌─┐┬  ┌─┐┬ ┬┌┬┐┌─┐  ┌─┐┬─┐┌─┐ ┬┌─┐┌─┐┌┬┐┌─┐%s\n' "$O1" "$R"
+    printf '%s  │  │  ├─┤│ │ ││├┤   ├─┘├┬┘│ │ │├┤ │   │ └─┐%s\n' "$O2" "$R"
+    printf '%s  └─┘┴─┘┴ ┴└─┘─┴┘└─┘  ┴  ┴└─└─┘└┘└─┘└─┘ ┴ └─┘%s\n' "$O3" "$R"
+  else
+    printf '  %s%s claude projects%s\n' "$O2$B" "$S_SPARK" "$R"
+  fi
+  [ "${4:-0}" -gt 0 ] && hid=" $S_DOT ${4} ignored (claude projects ignored)"
+  printf '  %s%s projects %s %s%s running%s%s %s %s%s%s%s Claude session %s %s%s%s%s uncommitted%s%s\n' \
+    "$GRY" "$1" "$S_DOT" "$GRN" "$2" "$R" "$GRY" "$S_DOT" "$O2" "$S_SPARK" "$R" "$GRY" "$S_DOT" "$YEL" "$S_DIRTY" "$R" "$GRY" "$hid" "$R"
+  printf '  %s\n' "$3"
+}
+hint() { printf '%s%s%s %s' "$O2" "$1" "$R" "$2"; }
+
+# ---------------------------------------------------------------- picker
+pick() {
+  need_fzf
+  if [ -z "$CP_ROOTS" ]; then
+    if ( : </dev/tty ) 2>/dev/null; then
+      say "${O2}First run:${R} let's choose which folders to scan."; setup || exit 1
+      load_config
+    else
+      die "not configured yet. Run: claude-projects setup"
+    fi
+  fi
+  make_tmp; prepare_data
+  local rows total running hidden out key path ed clip hints=""
+  rows=$(list_rows)
+  hidden=$(hidden_projects | grep -c .)
+  if [ -z "$rows" ]; then
+    say "No projects found in: $(printf '%s' "$CP_ROOTS" | tr ':' ' ')"
+    [ "$hidden" -gt 0 ] && say "$hidden are hidden by ignore rules. See them with: ${B}claude-projects ignored${R}"
+    say "Run ${B}claude-projects setup${R} to change folders, or ${B}claude-projects doctor${R} to diagnose."
+    exit 1
+  fi
+  total=$(printf '%s\n' "$rows" | grep -c .)
+  running=$(printf '%s\n' "$rows" | grep -c -- "$S_RUN") || running=0
+
+  local -a args
+  args=(--ansi "--delimiter=$TAB" --with-nth=2 --layout=reverse --height=95% --border
+        "--prompt=  $S_PROMPT " "--pointer=$S_PTR" --info=inline "--color=$FZF_COLORS"
+        "--preview=$(printf '%q' "$SELF") --preview {1}"
+        --expect=ctrl-o,ctrl-r,ctrl-g)
+  fzf_has --header-first && args+=(--header-first)
+  fzf_has --no-scrollbar && args+=(--no-scrollbar)
+  fzf_has --border=rounded && args+=(--border=rounded)
+  fzf_has --margin=0,1 && args+=(--margin=0,1 --padding=0,1)
+  if fzf_has '--preview-window=right,55%,wrap,border-left,<120(down,55%,wrap,border-top)'; then
+    args+=('--preview-window=right,55%,wrap,border-left,<120(down,55%,wrap,border-top)')
+  else
+    args+=('--preview-window=right:55%:wrap')
+  fi
+
+  hints="$(hint "$S_ENTER" new)  $(hint '^o' continue)  $(hint '^r' resume)  $(hint '^g' 'cd only')"
+  ed=${CP_EDITOR:-$(detect_editor)}
+  if [ -n "$ed" ] && command -v "${ed%% *}" >/dev/null 2>&1; then
+    if editor_is_gui "$ed"; then args+=("--bind=ctrl-e:execute-silent($ed {1})"); else args+=("--bind=ctrl-e:execute($ed {1})"); fi
+    hints="$hints  $(hint '^e' editor)"
+  fi
+  clip=$(clipboard_cmd)
+  if [ -n "$clip" ]; then args+=("--bind=ctrl-y:execute-silent(printf %s {1} | $clip)"); hints="$hints  $(hint '^y' 'copy path')"; fi
+  if fzf_has '--bind=ctrl-x:reload(true)'; then
+    args+=("--bind=ctrl-x:execute-silent($(printf '%q' "$SELF") ignore {1})+reload($(printf '%q' "$SELF") --list)")
+    hints="$hints  $(hint '^x' ignore)"
+  fi
+  if fzf_has '--bind=ctrl-/:toggle-preview'; then args+=('--bind=ctrl-/:toggle-preview'); hints="$hints  $(hint '^/' preview)"
+  else args+=('--bind=alt-p:toggle-preview'); hints="$hints  $(hint 'alt-p' preview)"; fi
+  args+=("--header=$(header "$total" "$running" "$hints" "$hidden")")
+
+  local -a extra=()
+  [ -n "$CP_FZF_OPTS" ] && eval "extra=($CP_FZF_OPTS)"
+
+  out=$(printf '%s\n' "$rows" | SHELL=$(command -v bash) FZF_DEFAULT_OPTS='' FZF_DEFAULT_OPTS_FILE='' \
+        fzf "${args[@]}" "${extra[@]}") || exit 1
+  key=$(printf '%s\n' "$out" | sed -n 1p)
+  path=$(printf '%s\n' "$out" | sed -n 2p | cut -f1)
+  [ -n "$path" ] || exit 1
+  printf '%s\t%s\n' "$key" "$path"
+}
+
+# ---------------------------------------------------------------- setup
+ask() { # ask "Question" default -> REPLY
+  local q=$1 d=$2
+  printf '%s %s[%s]%s ' "$q" "$GRY" "$d" "$R" >&2
+  IFS= read -r REPLY </dev/tty || REPLY=""
+  [ -z "$REPLY" ] && REPLY=$d
+}
+yes_no() { ask "$1" "$2"; case "$REPLY" in [Yy]*) return 0 ;; *) return 1 ;; esac; }
+
+scan_candidates() { # -> "count \t depth \t path" lines, best first
+  local out="$CP_TMP/scan" pid i=0 spin='|/-\'
+  # bash 3.2 slices strings by bytes, so only use the multi-byte spinner on bash 4+
+  [ "$UNICODE" = 1 ] && [ "${BASH_VERSINFO[0]}" -ge 4 ] && spin='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+  ( find "$HOME" -maxdepth 6 \
+      \( -path "$HOME/.*" -o -path "$HOME/Library" -o -path "$HOME/Applications" -o -path "$HOME/Pictures" \
+         -o -path "$HOME/Music" -o -path "$HOME/Movies" -o -path "$HOME/go/pkg" -o -name node_modules \
+         -o -name .venv -o -name venv -o -name vendor -o -name Pods -o -name .cache -o -name .Trash \) -prune \
+      -o -name .git -type d -print -prune 2>/dev/null > "$out" ) &
+  pid=$!
+  while kill -0 $pid 2>/dev/null; do
+    if [ $i -ge 450 ]; then kill $pid 2>/dev/null; say ""; say "  ${YEL}Scan stopped after 45s${R} — showing what was found so far."; break; fi
+    printf '\r  %s searching your home folder for git repos… %ss ' "${spin:$(( i % ${#spin} )):1}" $(( i / 10 )) >&2
+    sleep 0.1; i=$(( i + 1 ))
+  done
+  printf '\r\033[K' >&2
+  sed 's|/\.git$||' "$out" | awk -F/ -v home="$HOME" '
+    { rel = substr($0, length(home) + 2); n = split(rel, p, "/")
+      if (n == 1) { cand = $0; d = 0 }
+      else if ((p[1]=="Documents" || p[1]=="Desktop" || p[1]=="Downloads" || p[1]=="Dropbox") && n >= 3) { cand = home "/" p[1] "/" p[2]; d = n - 2 }
+      else { cand = home "/" p[1]; d = n - 1 }
+      c[cand]++; if (d > md[cand]) md[cand] = d }
+    END { for (k in c) printf "%d\t%d\t%s\n", c[k], md[k], k }' | sort -t "$TAB" -k1,1nr
+}
+
+setup() {
+  ( : </dev/tty ) 2>/dev/null || die "setup needs an interactive terminal"
+  [ -n "${CP_TMP:-}" ] || make_tmp
+  local cands sel roots="" depth=2 line c d p ed manual wrap hide nongit
+  say ""
+  say "  ${O2}${B}${S_SPARK} claude projects — setup${R}"
+  say "  ${GRY}This picks which folders to scan for repos. Re-run any time: claude-projects setup${R}"
+  [ $IS_MAC = 1 ] && say "  ${GRY}macOS may ask whether your terminal can access Documents/Desktop — allow it if your code lives there.${R}"
+  say ""
+  cands=$(scan_candidates)
+
+  if [ -n "$cands" ]; then
+    local display
+    display=$(printf '%s\n' "$cands" | while IFS="$TAB" read -r c d p; do
+      printf '%s\t%-40s %s%3s repos%s\n' "$p" "$(shortpath "$p")" "$GRY" "$c" "$R"; done)
+    if command -v fzf >/dev/null 2>&1; then
+      local -a fa=(--ansi --multi "--delimiter=$TAB" --with-nth=2 --layout=reverse --height=60% --border
+                   "--color=$FZF_COLORS" "--prompt=  folders $S_PROMPT "
+                   "--header=  TAB select/unselect  $S_DOT  ENTER confirm  $S_DOT  ESC = type folders yourself")
+      fzf_has '--bind=start:select-all' && fa+=('--bind=start:select-all')
+      fzf_has --header-first && fa+=(--header-first)
+      sel=$(printf '%s\n' "$display" | FZF_DEFAULT_OPTS='' FZF_DEFAULT_OPTS_FILE='' fzf "${fa[@]}" | cut -f1)
+    else
+      say "  Found these folders:"
+      local n=0; while IFS="$TAB" read -r p rest; do n=$((n+1)); say "   $n) $rest"; done <<EOF
+$display
+EOF
+      ask "  Which ones? (numbers separated by spaces, or 'all')" all
+      if [ "$REPLY" = all ]; then sel=$(printf '%s\n' "$display" | cut -f1)
+      else sel=$(for c in $REPLY; do printf '%s\n' "$display" | sed -n "${c}p" | cut -f1; done); fi
+    fi
+  else
+    say "  ${YEL}No git repos found automatically.${R} Type the folder(s) where you keep your projects below, e.g. ~/projects"
+  fi
+
+  ask "  Any other folders to include? (space-separated, Enter to skip)" ""
+  manual=$REPLY
+  for p in $manual; do
+    p=$(expand_path "$p"); p=${p%/}
+    if [ -d "$p" ]; then sel=$(printf '%s\n%s' "$sel" "$p"); else say "  ${YEL}skipping $p (not a folder)${R}"; fi
+  done
+
+  while IFS= read -r p; do
+    [ -z "$p" ] && continue
+    case ":$roots:" in *":$p:"*) continue ;; esac
+    roots="${roots:+$roots:}$p"
+    d=$(printf '%s\n' "$cands" | awk -F'\t' -v p="$p" '$3==p {print $2}')
+    [ -n "$d" ] && [ "$d" -gt "$depth" ] && depth=$d
+  done <<EOF
+$sel
+EOF
+  [ "$depth" -gt 6 ] && depth=6
+  if [ -z "$roots" ]; then say "  ${RED}No folders chosen — nothing saved.${R}"; return 1; fi
+  case ":$roots:" in *":$HOME:"*) say "  ${YEL}Note: scanning your whole home folder can be slow.${R}" ;; esac
+
+  say ""
+  ed=${CP_EDITOR:-$(detect_editor)}
+  ask "  Editor to open with ctrl-e" "${ed:-none}"; ed=$REPLY; [ "$ed" = none ] && ed=""
+  if yes_no "  Make it ${B}claude projects${R} (adds a subcommand to claude)? ${GRY}'cproj' always works either way${R}" Y; then wrap=yes; else wrap=no; fi
+  if yes_no "  Also list folders that aren't git repos? ${GRY}(shown as 'no git')${R}" Y; then nongit=yes; else nongit=no; fi
+  if yes_no "  Show your recent Claude prompts in the preview? ${GRY}(say n if you screen-share a lot)${R}" Y; then hide=no; else hide=yes; fi
+
+  mkdir -p "$CONF_DIR" || die "could not create $CONF_DIR"
+  {
+    echo "# claude-projects config — edit freely, or re-run: claude-projects setup"
+    echo "# Folders to scan (colon-separated). \$HOME is expanded."
+    printf 'CP_ROOTS="%s"\n' "$(printf '%s' "$roots" | sed "s|$HOME|\$HOME|g")"
+    echo "# How many folder levels below each root a repo can be"
+    printf 'CP_DEPTH=%s\n' "$depth"
+    echo "# yes = also list folders that aren't git repos (directly inside a root, or where you've used Claude)"
+    printf 'CP_INCLUDE_NONGIT=%s\n' "$nongit"
+    echo "# Command for ctrl-e (empty = auto-detect)"
+    printf 'CP_EDITOR="%s"\n' "$ed"
+    echo "# yes = hide your past prompts in the preview (handy when screen-sharing)"
+    printf 'CP_HIDE_PROMPTS=%s\n' "$hide"
+    echo "# yes = 'claude projects' works; no = only 'cproj'"
+    printf 'CP_WRAP_CLAUDE=%s\n' "$wrap"
+    echo "# Words after 'claude' that open the picker (space-separated), e.g. \"projects p\""
+    printf 'CP_WORDS="%s"\n' "$CP_WORDS"
+    echo "# auto | dark | light | none     and   auto | yes | no  for plain-ASCII symbols"
+    printf 'CP_THEME=%s\nCP_ASCII=%s\n' "$CP_THEME" "$CP_ASCII"
+    echo "# Extra fzf options, e.g. \"--height=100%\""
+    printf 'CP_FZF_OPTS="%s"\n' "$CP_FZF_OPTS"
+  } > "$CONF"
+  say ""
+  say "  ${GRN}${S_OK}${R} Saved ${B}$(shortpath "$CONF")${R}"
+  say "    folders: $(printf '%s' "$roots" | tr ':' '\n' | while IFS= read -r p; do printf '%s  ' "$(shortpath "$p")"; done)"
+  say "    ${GRY}Hide a project any time: claude projects ignore <path|name>  (or ctrl-x in the picker)${R}"
+  [ "$wrap" != "${_PREV_WRAP:-$wrap}" ] && say "    ${YEL}Open a new terminal tab for the claude/cproj change to apply.${R}"
+  say ""
+  return 0
+}
+
+# ---------------------------------------------------------------- doctor
+doctor() {
+  local BAD=0 WARN=0 v rc found=0 t0 t1 n p c out roots_ok=0
+  ok()   { printf '  %s%s%s %s\n' "$GRN" "$S_OK" "$R" "$*"; }
+  warn() { printf '  %s!%s  %s\n' "$YEL" "$R" "$*"; WARN=$((WARN+1)); }
+  bad()  { printf '  %s%s%s %s\n' "$RED" "$S_BAD" "$R" "$*"; BAD=$((BAD+1)); }
+  info() { printf '  %s%s  %s%s\n' "$GRY" "$S_DOT" "$*" "$R"; }
+  sect() { printf '\n%s%s%s\n' "$O2$B" "$*" "$R"; }
+  # run an interactive shell command with a 6s cap so a slow/odd rc file can't hang doctor
+  ishell() {
+    local sh=$1 cmd=$2 f="$CP_TMP/ish.$$" pid i=0
+    ( "$sh" -ic "$cmd" </dev/null >"$f" 2>/dev/null ) & pid=$!
+    while kill -0 $pid 2>/dev/null; do [ $i -ge 60 ] && { kill $pid 2>/dev/null; break; }; sleep 0.1; i=$((i+1)); done
+    cat "$f" 2>/dev/null
+  }
+  make_tmp
+
+  printf '%s%s claude-projects doctor%s  %sv%s%s\n' "$O2$B" "$S_SPARK" "$R" "$GRY" "$CP_VERSION" "$R"
+  info "$(uname -sr) $S_DOT login shell ${SHELL:-?} $S_DOT bash $BASH_VERSION $S_DOT installed at $(shortpath "$CP_HOME")"
+
+  sect "Dependencies"
+  if command -v fzf >/dev/null 2>&1; then
+    v=$(fzf_version)
+    if ver_ge "$v" 0.38; then ok "fzf $v"; else warn "fzf $v is old — the picker works, but some features are turned off. Upgrade: brew upgrade fzf"; fi
+    fzf_has --header-first || info "this fzf has no --header-first (header shows below the prompt)"
+  else bad "fzf not found — required. Install: brew install fzf"; fi
+  if command -v jq >/dev/null 2>&1; then ok "jq $(jq --version 2>/dev/null | sed 's/^jq-//')"
+  else warn "jq not found — the preview can't show your recent prompts. Install: brew install jq"; fi
+  if command -v git >/dev/null 2>&1; then ok "git $(git --version | awk '{print $3}')"; else bad "git not found"; fi
+  if command -v claude >/dev/null 2>&1; then
+    v=$(claude --version 2>/dev/null | head -1)
+    ok "Claude Code ${v:-found} ($(shortpath "$(command -v claude)"))"
+  else bad "claude (Claude Code) not on PATH — install it first: https://docs.claude.com/en/docs/claude-code"; fi
+
+  sect "Config"
+  if [ -f "$CONF" ]; then ok "config file $(shortpath "$CONF")"; else warn "no config yet — run: claude-projects setup"; fi
+  if [ -z "$CP_ROOTS" ]; then bad "no folders to scan (CP_ROOTS is empty) — run: claude-projects setup"
+  else
+    local IFS_SAVE=$IFS; IFS=:
+    for p in $CP_ROOTS; do
+      IFS=$IFS_SAVE
+      p=$(expand_path "$p")
+      if [ ! -d "$p" ]; then warn "folder missing: $(shortpath "$p")"
+      else
+        out=$(CP_ROOTS=$p find_projects)
+        n=$(printf '%s\n' "$out" | grep -c .); c=$(printf '%s\n' "$out" | grep -c "^dir$TAB")
+        roots_ok=1
+        if [ "$p" = "$HOME" ] || [ "$p" = / ]; then warn "$(shortpath "$p") — scanning this whole folder is slow; pick narrower folders"
+        elif [ "$n" -eq 0 ]; then warn "$(shortpath "$p") — no projects within $CP_DEPTH levels (raise CP_DEPTH?)"
+        else ok "$(shortpath "$p") — $n projects ($((n - c)) git, $c without git)"; fi
+      fi
+      IFS=:
+    done
+    IFS=$IFS_SAVE
+  fi
+  if [ "$roots_ok" = 1 ]; then
+    t0=$(date +%s); prepare_data; LIST_OUT=$(list_rows); t1=$(date +%s)
+    n=$(printf '%s\n' "$LIST_OUT" | grep -c .)
+    c=$(hidden_projects | grep -c .)
+    [ "$c" -gt 0 ] && info "$c hidden by ignore rules — see them with: claude-projects ignored"
+    [ "$CP_INCLUDE_NONGIT" = yes ] || info "folders without git are hidden (CP_INCLUDE_NONGIT=no)"
+    if [ $((t1 - t0)) -ge 3 ]; then warn "listing $n projects took $((t1 - t0))s — narrow CP_ROOTS or lower CP_DEPTH (now $CP_DEPTH)"
+    else ok "listed $n projects in under $((t1 - t0 + 1))s"; fi
+  fi
+
+  sect "Shell integration"
+  for rc in "${ZDOTDIR:-$HOME}/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile"; do
+    [ -f "$rc" ] || continue
+    if grep -q '>>> claude-projects >>>' "$rc" 2>/dev/null; then
+      found=1; ok "loaded from $(shortpath "$rc")"
+      [ -L "$rc" ] && info "$(shortpath "$rc") is a symlink (dotfiles?) — commit the change there or it may be overwritten"
+      if [ "$(grep -c '>>> claude-projects >>>' "$rc")" -gt 1 ]; then warn "$(shortpath "$rc") has the block more than once — re-run install.sh to tidy it"; fi
+    fi
+    if grep -Eq '^[[:space:]]*(function[[:space:]]+)?claude[[:space:]]*\(\)' "$rc" 2>/dev/null && ! grep -q 'claude-projects.sh' "$rc"; then
+      warn "$(shortpath "$rc") defines its own claude() function — it may override this one"
+    fi
+  done
+  [ $found = 0 ] && bad "not hooked into any shell startup file — re-run install.sh"
+  case "${SHELL##*/}" in
+    zsh|bash)
+      out=$(ishell "${SHELL##*/}" 'type cproj; type claude; alias claude')
+      if printf '%s' "$out" | grep -q 'cproj is.*function'; then ok "cproj is available in new ${SHELL##*/} shells"
+      else bad "cproj isn't defined in a new ${SHELL##*/} shell — check the line install.sh added"; fi
+      if [ "$CP_WRAP_CLAUDE" = yes ]; then
+        if printf '%s' "$out" | grep -q 'claude is.*function'; then ok "'claude ${CP_WORDS%% *}' is wired up"
+        elif printf '%s' "$out" | grep -q 'claude is.*alias'; then warn "an alias for claude is defined after claude-projects loads, so it wins. Move the claude-projects block to the end of your rc file"
+        else warn "'claude ${CP_WORDS%% *}' isn't wired up in new shells (use cproj, or check your rc file)"; fi
+      fi
+      v=$(printf '%s\n' "$out" | grep -E "^(alias )?claude=" | head -1)
+      [ -n "$v" ] && info "you have $v — claude-projects keeps its flags when it launches Claude"
+      ;;
+    fish) bad "fish isn't supported yet — run cproj from zsh or bash" ;;
+    *) warn "unrecognised login shell ${SHELL:-?} — supported: zsh, bash" ;;
+  esac
+  if [ "${CP_WRAPPER_LOADED:-}" = 1 ]; then ok "active in this terminal"
+  else info "not active in this terminal yet — open a new tab (or: source your rc file)"; fi
+
+  sect "Claude sessions"
+  if [ -d "$SESS_ROOT" ]; then
+    n=$(ls -d "$SESS_ROOT"/*/ 2>/dev/null | wc -l | tr -d ' ')
+    ok "$n project folders in $(shortpath "$SESS_ROOT")"
+    local newest; newest=$(ls -t "$SESS_ROOT"/*/*.jsonl 2>/dev/null | head -1)
+    if [ -n "$newest" ]; then
+      if grep -q '"cwd": *"' "$newest" 2>/dev/null; then ok "session format recognised"
+      else warn "couldn't read the folder from the newest session — Claude's format may have changed; matching falls back to folder names"; fi
+      if command -v jq >/dev/null 2>&1 && [ "$CP_HIDE_PROMPTS" != yes ]; then
+        c=$(tail -c 4000000 "$newest" | grep '"type": *"user"' | jq -rR 'fromjson? | select(.type=="user") | 1' 2>/dev/null | wc -l | tr -d ' ')
+        [ "$c" -gt 0 ] && ok "prompt history readable" || warn "no prompts found in the newest session — preview will skip them"
+      fi
+    fi
+    [ "$roots_ok" = 1 ] && info "$(printf '%s\n' "$LIST_OUT" | grep -c -- "$S_SPARK") of your projects show ✻ (Claude used there)"
+  else warn "no Claude session folder at $(shortpath "$SESS_ROOT") yet — run claude in a repo once"; fi
+  [ "$CP_HIDE_PROMPTS" = yes ] && info "prompts are hidden in the preview (CP_HIDE_PROMPTS=yes)"
+
+  sect "Terminal & extras"
+  if [ "$UNICODE" = 1 ]; then ok "UTF-8 locale"; else warn "non-UTF-8 locale — using plain ASCII symbols (set LANG=en_US.UTF-8 for the full look)"; fi
+  v=$(tput colors 2>/dev/null || echo 0)
+  if [ "$THEME" = none ]; then info "colours off (NO_COLOR or CP_THEME=none)"
+  elif [ "${v:-0}" -ge 256 ]; then ok "$v colours, theme: $THEME"; else warn "terminal reports ${v:-0} colours — set CP_THEME=none if it looks odd"; fi
+  [ -n "${FZF_DEFAULT_OPTS:-}${FZF_DEFAULT_OPTS_FILE:-}" ] && info "your FZF_DEFAULT_OPTS are ignored here (put extras in CP_FZF_OPTS)"
+  v=${CP_EDITOR:-$(detect_editor)}
+  if [ -n "$v" ] && command -v "${v%% *}" >/dev/null 2>&1; then ok "ctrl-e opens: $v"; else warn "no editor found for ctrl-e — set CP_EDITOR in the config"; fi
+  v=$(clipboard_cmd); [ -n "$v" ] && ok "ctrl-y copies with: $v" || warn "no clipboard tool found — ctrl-y is disabled"
+  if [ $IS_MAC = 1 ] && ! command -v lsof >/dev/null 2>&1; then warn "lsof missing — can't show which repos have Claude running"; fi
+
+  echo
+  if [ $BAD -gt 0 ]; then printf '%s%s problem(s), %s warning(s).%s Fix the %s%s%s lines above first.\n' "$RED$B" "$BAD" "$WARN" "$R" "$RED" "$S_BAD" "$R"; return 1
+  elif [ $WARN -gt 0 ]; then printf '%sWorking, with %s warning(s).%s\n' "$YEL$B" "$WARN" "$R"
+  else printf '%s%s All good.%s Run: claude %s  (or cproj)\n' "$GRN$B" "$S_OK" "$R" "${CP_WORDS%% *}"; fi
+}
+
+# ---------------------------------------------------------------- update / help
+update() {
+  if [ -d "$CP_HOME/.git" ]; then
+    say "Updating $(shortpath "$CP_HOME")…"
+    git -C "$CP_HOME" pull --ff-only || die "git pull failed — resolve it in $CP_HOME and try again"
+    "$CP_HOME/install.sh" --no-deps --no-setup --quiet
+  else
+    say "This copy wasn't installed from a git clone. Pull your clone of the repo and re-run its install.sh."
+  fi
+}
+
+# ---------------------------------------------------------------- list / ignore (plain text, for people and Claude)
+list_cmd() { # [--all]
+  local all=0 p pretty kind cl last
+  [ "${1:-}" = --all ] && all=1
+  plain_if_piped
+  [ -n "$CP_ROOTS" ] || die "not configured yet. Run: claude-projects setup"
+  make_tmp; prepare_data
+  printf '%-7s %-6s %-9s %s\n' KIND CLAUDE LAST PATH
+  list_rows | while IFS="$TAB" read -r p pretty kind cl last; do
+    [ "$kind" = dir ] && kind=folder
+    [ "$last" = "$S_DASH" ] && last=never
+    printf '%-7s %-6s %-9s %s\n' "$kind" "$cl" "$last" "$(shortpath "$p")"
+  done
+  if [ $all = 1 ]; then
+    hidden_projects | while IFS="$TAB" read -r kind p rule; do
+      printf '%-7s %-6s %-9s %s   (rule: %s)\n' ignored - - "$(shortpath "$p")" "$rule"
+    done
+  else
+    p=$(hidden_projects | grep -c .)
+    [ "$p" -gt 0 ] && printf '\n%s more hidden by ignore rules. Show them: claude-projects list --all\n' "$p"
+  fi
+  return 0
+}
+
+ignored_cmd() {
+  local r hid kind p any=0
+  plain_if_piped; load_ignores
+  if [ -z "$IGN_RULES" ]; then
+    echo "Nothing is ignored. Hide a project with: claude-projects ignore <path|name|pattern>"
+    return 0
+  fi
+  printf 'Ignore rules (%s):\n\n' "$(shortpath "$IGNORE_FILE")"
+  hid=$(find_all_projects | apply_ignores hidden)
+  while IFS= read -r r; do
+    printf '  %s%s%s\n' "$B" "$r" "$R"
+    any=0
+    while IFS="$TAB" read -r kind p rr; do
+      [ "$rr" = "$r" ] && { printf '      hides %s\n' "$(shortpath "$p")"; any=1; }
+    done <<EOF
+$hid
+EOF
+    [ $any = 1 ] || printf '      %shides nothing right now%s\n' "$GRY" "$R"
+  done <<EOF
+$IGN_RULES
+EOF
+  printf '\nShow one again: claude-projects unignore <rule>\n'
+}
+
+# Turn an argument into a rule: paths (anything with a /, or . / ..) become ~/... folder rules;
+# a bare word or glob is a folder-name rule.
+to_rule() {
+  local a=$1
+  case "$a" in
+    .|..|*/*)
+      a=$(expand_path "$a")
+      if [ -d "$a" ]; then a=$(cd "$a" && pwd)
+      else case "$a" in /*) ;; *) return 1 ;; esac; fi
+      shortpath "${a%/}" ;;
+    *) printf '%s' "$a" ;;
+  esac
+}
+
+ignore_cmd() {
+  local a rule n
+  plain_if_piped
+  [ $# -gt 0 ] || { echo "usage: claude-projects ignore <path|name|pattern>...   e.g. ~/code/old-thing  scratch  '*-backups'" >&2; return 2; }
+  mkdir -p "$CONF_DIR" || die "could not create $CONF_DIR"
+  if [ ! -f "$IGNORE_FILE" ]; then
+    cat > "$IGNORE_FILE" <<'EOF'
+# claude-projects ignore rules — one per line. Edit freely, or use:
+#   claude-projects ignore <rule>   claude-projects unignore <rule>   claude-projects ignored
+#   ~/code/old-stuff     a folder (and everything inside it)
+#   scratch              any project with this folder name
+#   *-backups            glob on the folder name;   ~/code/archive-*   glob on the full path
+EOF
+  fi
+  for a in "$@"; do
+    rule=$(to_rule "$a") || { echo "no such folder: $a (use a full path, or a bare folder name)" >&2; continue; }
+    if grep -qxF -- "$rule" "$IGNORE_FILE"; then echo "already ignored: $rule"; continue; fi
+    printf '%s\n' "$rule" >> "$IGNORE_FILE"
+    IGN_RULES=$rule; [ $IS_MAC = 1 ] && shopt -s nocasematch
+    n=$(find_all_projects | apply_ignores hidden | grep -c .)
+    echo "ignored: $rule  (hides $n project$( [ "$n" = 1 ] || echo s))"
+    case "$rule" in /*|"~"*) [ -d "$(expand_path "$rule")" ] || echo "  note: that folder doesn't exist (yet)" ;; esac
+  done
+}
+
+unignore_cmd() {
+  local a rule rc=0 p
+  plain_if_piped
+  [ $# -gt 0 ] || { echo "usage: claude-projects unignore <rule|path>...   (see rules with: claude-projects ignored)" >&2; return 2; }
+  [ -f "$IGNORE_FILE" ] || { echo "nothing is ignored"; return 1; }
+  for a in "$@"; do
+    rule=$(to_rule "$a") || rule=$a
+    if grep -qxF -- "$rule" "$IGNORE_FILE"; then
+      awk -v r="$rule" '{ t = $0; gsub(/^[ \t]+|[ \t]+$/, "", t); if (t != r) print }' "$IGNORE_FILE" > "$IGNORE_FILE.tmp" \
+        && mv "$IGNORE_FILE.tmp" "$IGNORE_FILE" && echo "no longer ignored: $rule"
+    else
+      p=$(expand_path "$rule"); load_ignores
+      if ignored_by "$p"; then
+        echo "$rule isn't a rule itself, but rule '$IGN_HIT' hides it. Remove that with: claude-projects unignore '$IGN_HIT'" >&2
+      else echo "no rule matches: $rule  (see rules with: claude-projects ignored)" >&2; fi
+      rc=1
+    fi
+  done
+  return $rc
+}
+
+usage() {
+  cat <<EOF
+claude-projects $CP_VERSION — jump between projects and Claude Code sessions
+
+  claude projects        open the picker      (or: cproj)
+  claude projects setup  choose folders, editor, privacy
+  claude projects doctor check your install and explain problems
+  claude projects update update to the latest version
+
+Plain-text commands (fine to run from scripts, or to ask Claude to run for you):
+  claude-projects list [--all]                  every project: kind (git/folder), Claude used, last active
+                                                --all also shows ignored projects and the rule hiding each
+  claude-projects ignore <path|name|pattern>... hide projects, e.g. ~/code/old-thing  scratch  '*-backups'
+  claude-projects unignore <rule|path>...       show them again
+  claude-projects ignored                       list ignore rules and what each one hides
+
+In the picker:
+  enter  new session       ctrl-o continue last session   ctrl-r pick a past session
+  ctrl-g just cd there     ctrl-e open in editor          ctrl-y copy path
+  ctrl-x ignore project    ctrl-/ toggle preview          esc    cancel
+
+Projects are git repos, plus (CP_INCLUDE_NONGIT=yes) folders directly inside your project
+folders and folders where you've used Claude. Non-git ones show "no git".
+
+Config: $(shortpath "$CONF")     Ignore rules: $(shortpath "$IGNORE_FILE")
+EOF
+}
+
+# ---------------------------------------------------------------- main
+# Tests can source this file without running anything.
+[ "${CP_NO_MAIN:-}" = 1 ] && return 0 2>/dev/null
+load_config
+setup_style
+case "${1:-}" in
+  ""|pick)          pick ;;
+  setup)            make_tmp; _PREV_WRAP=$CP_WRAP_CLAUDE; setup ;;
+  doctor)           plain_if_piped; doctor ;;
+  update)           update ;;
+  list)             shift; list_cmd "$@" ;;
+  ignore)           shift; ignore_cmd "$@" ;;
+  unignore)         shift; unignore_cmd "$@" ;;
+  ignored)          ignored_cmd ;;
+  version|--version|-v) echo "claude-projects $CP_VERSION" ;;
+  help|--help|-h)   usage ;;
+  --list)           make_tmp; prepare_data; list_rows ;;
+  --row)            row "$2" ;;
+  --preview)        [ -n "${CP_INDEX:-}" ] || { make_tmp; prepare_data; }   # standalone use, outside fzf
+                    preview "$2" ;;
+  *)                usage >&2; exit 2 ;;
+esac
