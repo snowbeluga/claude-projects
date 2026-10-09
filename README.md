@@ -170,29 +170,9 @@ claude projects update                                  # git pull + re-install
 ~/.local/share/claude-projects/uninstall.sh --purge     # also deletes config
 ```
 
-## Develop
+## Contributing
 
-`tests/smoke.sh` runs the whole flow in a throwaway `$HOME` with stub `fzf` and `claude` binaries: listing, preview, picker, non-git folders, ignore rules, install twice, wrapper, doctor, uninstall, and a fake Homebrew layout. It never touches your real setup. The scripts must stay compatible with bash 3.2 (macOS `/bin/bash`), so run the tests with that too:
-
-```sh
-/bin/bash tests/smoke.sh
-```
-
-### Releasing
-
-Releases are git tags, and the Homebrew formula points at the tag's tarball. One-time setup: clone the tap next to this repo.
-
-```sh
-git clone https://github.com/snowbeluga/homebrew-tap.git ../homebrew-tap
-```
-
-Then, with your changes committed on `main`:
-
-```sh
-scripts/release.sh 1.1.0
-```
-
-It sets `CP_VERSION`, runs the tests, tags `v1.1.0`, pushes, and updates the formula's `url` and `sha256` in the tap. Users then get it with `brew update && brew upgrade claude-projects`.
+Want to change something? See [CONTRIBUTING.md](CONTRIBUTING.md) for running the tests and cutting a release.
 
 ## License
 
