@@ -9,7 +9,7 @@
 #
 # Written for bash 3.2+ (the macOS default) and GNU/BSD userlands. Requires fzf; jq optional.
 
-CP_VERSION="1.0.0"
+CP_VERSION="1.0.1"
 TAB=$(printf '\t')
 
 # ---------------------------------------------------------------- paths
