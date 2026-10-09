@@ -6,6 +6,7 @@ T=$(mktemp -d "${TMPDIR:-/tmp}/cp-test.XXXXXX"); trap 'rm -rf "$T"' EXIT
 T=$(cd "$T" && pwd)   # macOS TMPDIR ends in '/', giving 'T//cp-test'; normalise so it matches $(pwd)
 export HOME="$T/home" XDG_CONFIG_HOME="" XDG_CACHE_HOME="" CLAUDE_CONFIG_DIR="" NO_COLOR=1 LANG=en_US.UTF-8
 unset CP_HOME CP_ROOTS CLAUDE_PROJECT_ROOTS FZF_DEFAULT_OPTS ZDOTDIR
+export CP_NO_TTY=1   # never prompt, even when run from a real terminal
 mkdir -p "$HOME" "$T/stub"
 PASS=0; FAIL=0
 check() { if eval "$2"; then PASS=$((PASS+1)); printf '  ok   %s\n' "$1"; else FAIL=$((FAIL+1)); printf '  FAIL %s\n' "$1"; fi; }
@@ -17,10 +18,14 @@ for a in "$@"; do
   case "$a" in --version) echo "0.56.0 (stub)"; exit 0 ;; --filter=*) cat >/dev/null; exit 1 ;; esac
 done
 printf '%s\n' "$*" >> "$HOME/fzf-args.log"
-in=$(cat)
+in=$(cat); printf '%s\n' "$in" > "$HOME/fzf-input.log"
 case " $* " in *" --multi "*) printf '%s\n' "$in"; exit 0 ;; esac
+# like real fzf: --print-query prints the query first; enter with no match exits 1
+case " $* " in *" --print-query "*) printf '%s\n' "${FZF_STUB_QUERY:-}" ;; esac
 case " $* " in *--expect=*) printf '%s\n' "${FZF_STUB_KEY:-}" ;; esac
-printf '%s\n' "$in" | grep -F -- "${FZF_STUB_PICK:-}" | head -1
+hit=$(printf '%s\n' "$in" | grep -F -- "${FZF_STUB_PICK:-}" | head -1)
+[ -n "$hit" ] || exit 1
+printf '%s\n' "$hit"
 EOF
 cat > "$T/stub/claude" <<'EOF'
 #!/usr/bin/env bash
@@ -84,8 +89,33 @@ echo "picker"
 O=$(FZF_STUB_PICK=charlie FZF_STUB_KEY=ctrl-o "$BIN")
 check "picker returns key + path" '[ "$O" = "ctrl-o	$HOME/code/org/charlie" ]'
 check "user FZF_DEFAULT_OPTS ignored, header present" 'grep -q -- "--header=" "$HOME/fzf-args.log"'
-O=$(CP_ROOTS="$HOME/nowhere" "$BIN" 2>&1); rc=$?
-check "no repos -> helpful message, exit 1" '[ $rc = 1 ] && printf "%s" "$O" | grep -q "claude-projects setup"'
+mkdir -p "$HOME/empty-root"
+O=$(CP_ROOTS="$HOME/empty-root" FZF_STUB_PICK=nothing-matches "$BIN" 2>&1); rc=$?
+check "no projects -> picker still opens with just New project" '[ $rc = 1 ] && [ "$(grep -c . "$HOME/fzf-input.log")" = 1 ] && grep -q "New project" "$HOME/fzf-input.log"'
+check "New project row preview welcomes first-timers" 'CP_EMPTY=1 CP_ROOTS="$HOME/empty-root" "$BIN" --preview +new | grep -q "No projects here yet"'
+O=$(FZF_STUB_PICK=charlie "$BIN"); 
+check "New project is the last row, ctrl-n/^l in header" 'tail -1 "$HOME/fzf-input.log" | grep -q "New project" && grep -q "new project" "$HOME/fzf-args.log" && grep -q -- "--bind=ctrl-l:reload" "$HOME/fzf-args.log"'
+O=$(CP_INDEX= "$BIN" --reload)
+check "refresh (ctrl-l) output keeps the New project row" 'printf "%s\n" "$O" | tail -1 | grep -q "^+new" && printf "%s" "$O" | grep -q "code/bravo"'
+
+echo "new project"
+O=$(FZF_STUB_KEY=ctrl-n FZF_STUB_QUERY="My App" FZF_STUB_PICK=charlie "$BIN" 2>/dev/null)
+check "ctrl-n uses the search text as the name" '[ "$O" = "new	$HOME/code/My-App	" ] && [ -d "$HOME/code/My-App/.git" ]'
+O=$(FZF_STUB_QUERY="recipes" FZF_STUB_PICK=zzz-no-match "$BIN" 2>/dev/null)
+check "enter with no match creates a project from the search text" '[ "$O" = "new	$HOME/code/recipes	" ]'
+O=$(FZF_STUB_PICK="New project" "$BIN" 2>&1); rc=$?
+check "New project row with no name and no terminal explains itself" '[ $rc != 0 ] && printf "%s" "$O" | grep -q "needs a name"'
+O=$("$BIN" new demo --prompt "build a todo app" 2>/dev/null)
+check "new <name> prints the folder, git init" '[ "$O" = "$HOME/code/demo" ] && [ -d "$HOME/code/demo/.git" ]'
+O=$("$BIN" new demo 2>&1); rc=$?
+check "new refuses an existing folder" '[ $rc != 0 ] && printf "%s" "$O" | grep -q "already exists"'
+check "new with a single project folder" '[ "$(CP_ROOTS="$HOME/code" "$BIN" new solo 2>/dev/null)" = "$HOME/code/solo" ]'
+check "new --no-git / --in" '[ "$("$BIN" new plain --no-git --in "$HOME/Documents/GitHub" 2>/dev/null)" = "$HOME/Documents/GitHub/plain" ] && [ ! -e "$HOME/Documents/GitHub/plain/.git" ]'
+O=$(CP_FAKE_NO_GIT=1 "$BIN" new nogit 2>&1)
+check "no git installed: still creates the folder and says how to add git" '[ -d "$HOME/code/nogit" ] && [ ! -e "$HOME/code/nogit/.git" ] && printf "%s" "$O" | grep -q "install git"'
+check "new project shows up sorted by its files (no commits yet)" '"$BIN" list | grep -q "^git .*~/code/demo$" && ! "$BIN" list | grep "~/code/demo$" | grep -q never'
+check "slugify" '[ "$(CP_NO_MAIN=1 bash -c ". \"$BIN\"; slugify \"  .My  big/app \"")" = "My-big-app" ]'
+rm -rf "$HOME/code/solo" "$HOME/code/My-App" "$HOME/code/recipes" "$HOME/code/demo" "$HOME/code/nogit" "$HOME/Documents/GitHub/plain" "$HOME/empty-root"
 
 echo "non-git projects + ignore rules"
 mkdir -p "$HOME/code/notes" "$HOME/code/old-backups" "$HOME/code/org/drafts" && echo n > "$HOME/code/notes/todo.md"
@@ -146,6 +176,9 @@ W=$(cd "$T" && bash -c 'source ~/.bashrc; source ~/.bashrc; claude x' 2>&1)
 check "sourcing twice still keeps alias flags" 'printf "%s" "$W" | grep -q "args=--model opus x"'
 W=$(cd "$T" && bash -c 'source ~/.bashrc; claude projects version' 2>&1)
 check "claude projects version" 'printf "%s" "$W" | grep -q "claude-projects 1"'
+W=$(cd "$T" && bash -c 'source ~/.bashrc; claude projects new wrapped --prompt "make a game"; pwd' 2>&1)
+check "claude projects new -> cd + Claude with the first prompt" 'printf "%s" "$W" | grep -q "pwd=$HOME/code/wrapped args=--model opus make a game" && printf "%s" "$W" | tail -1 | grep -q "code/wrapped$"'
+rm -rf "$HOME/code/wrapped"
 W=$(cd "$T" && bash -c 'source ~/.bashrc; claude projects ignored; cproj list' 2>&1)
 check "claude projects ignored / cproj list" 'printf "%s" "$W" | grep -q "Nothing is ignored" && printf "%s" "$W" | grep -q "^KIND"'
 sed -i.tmp 's/^CP_ROOTS=.*/&\nCP_WRAP_CLAUDE=no/' "$HOME/.config/claude-projects/config" && rm -f "$HOME/.config/claude-projects/config.tmp"

@@ -7,19 +7,21 @@ A terminal picker for jumping between your projects and Claude Code sessions.
   │  │  ├─┤│ │ ││├┤   ├─┘├┬┘│ │ │├┤ │   │ └─┐
   └─┘┴─┘┴ ┴└─┘─┴┘└─┘  ┴  ┴└─└─┘└┘└─┘└─┘ ┴ └─┘
   12 projects · 1 running · ✻ Claude session · ● uncommitted
-  ↵ new  ^o continue  ^r resume  ^g cd only  ^e editor  ^y copy path  ^x ignore  ^/ preview
+  ↵ open  ^n new project  ^o continue  ^r resume  ^g cd only  ^e editor  ^y copy  ^x ignore  ^l refresh
   ❯
 ▌ ▶ identity-api      feat/token-refresh   ●  2h ago ✻   │ identity-api
     pra-console       main                    1d ago ✻   │ ✻ CLAUDE  last session 2h ago · 14 total
     research-notes    no git                  1w ago ✻   │   Refactor token refresh flow
     docs-site         main                    3w ago     │   › fix the refresh bug in auth middleware
-                                                         │   › now add tests for the expiry edge case
+    ＋ New project  ctrl-n                               │   › now add tests for the expiry edge case
                                                          │ ⎇ GIT  feat/token-refresh  ↑2  3 changed
 ```
 
 Type `claude projects` (or `cproj`). You get your projects sorted by what you touched most recently, with a preview of what you last asked Claude in each one. Pick one and you're in a Claude session there.
 
 Projects don't have to be git repos. Folders directly inside your project folders, and any folder where you've used Claude, are listed too and marked `no git`.
+
+Starting something new? Pick **＋ New project** at the bottom of the list, or press `ctrl-n`. Give it a name and, if you like, say what you want to build. It makes the folder, sets up git, and opens Claude with that as your first message.
 
 Every other `claude …` command goes straight to Claude Code, unchanged.
 
@@ -37,7 +39,7 @@ claude-projects install-shell
 `brew install` puts the tool on your PATH and installs `fzf` and `jq`. Homebrew never edits shell config, so `install-shell` does that step:
 
 - adds **one line** to your `~/.zshrc` and/or `~/.bashrc`, after making a backup (`*.claude-projects.bak`)
-- asks which folders your projects live in (skipped if you already have a config)
+- asks which folders your projects live in (skipped if you already have a config). If you don't have one yet, it suggests creating `~/projects`. Press enter to accept, or type another name or an existing folder
 - runs `claude projects doctor` to confirm everything works
 
 ### Without Homebrew
@@ -73,7 +75,9 @@ You need the full path the first time because the old `~/.local/bin/claude-proje
 | `ctrl-g` | just `cd` there, no Claude |
 | `ctrl-e` | open the project in your editor |
 | `ctrl-y` | copy the path |
+| `ctrl-n` | start a new project (same as the **＋ New project** row at the bottom) |
 | `ctrl-x` | ignore that project (hide it from the list) |
+| `ctrl-l` or `F5` | refresh the list, e.g. after working in another tab |
 | `ctrl-/` | show or hide the preview (handy when screen-sharing) |
 | `esc` | cancel |
 
@@ -81,6 +85,7 @@ Anything else after `projects` is passed to Claude. For example, `claude project
 
 | Command | |
 |---|---|
+| `claude projects new [name]` | start a new project: makes the folder, runs `git init`, opens Claude |
 | `claude projects setup` | choose folders, editor, privacy settings |
 | `claude projects doctor` | check the install and explain any problems |
 | `claude projects update` | update to the latest version (Homebrew installs: `brew upgrade claude-projects`) |
@@ -92,6 +97,18 @@ Anything else after `projects` is passed to Claude. For example, `claude project
 | `claude projects uninstall-shell` | remove that line again |
 | `cproj …` | same as `claude projects …`, and always available |
 | `claude-projects …` | the command itself, on your PATH. Use it in scripts, or anywhere the shell functions aren't loaded |
+
+## Starting a new project
+
+From the picker, choose **＋ New project** (the last row) or press `ctrl-n`. Or run `claude projects new`. You're asked:
+
+1. **A name.** Spaces become hyphens. If you typed something in the search box first, that's used. Typing a name that matches no project and pressing enter offers to create it too.
+2. **Where**, only if you have more than one project folder.
+3. **What you want to build** (optional). This becomes your first message to Claude, so you can go straight from an idea to Claude working on it.
+
+The folder is created with `git init`, so every change Claude makes can be reviewed or undone. If git isn't installed, it offers to install it: Apple's Command Line Tools on macOS, or your package manager on Linux. You can also skip it and the project is still created. Set `CP_NEW_GIT=no` to never use git for new projects.
+
+Scripts, and Claude, can do the same without any questions: `claude-projects new recipe-app --prompt "a recipe app" [--in FOLDER] [--no-git]` prints the new folder's path.
 
 **Symbols:** ▶ Claude is running there now · ✻ you were last active there through Claude (for `no git` folders: you've used Claude there) · ● uncommitted changes.
 
@@ -120,6 +137,7 @@ Settings live in `~/.config/claude-projects/config`. `setup` writes the file, an
 | `CP_ROOTS` | (from setup) | folders to scan, colon-separated |
 | `CP_DEPTH` | `3` | how many folder levels below a root a repo can be |
 | `CP_INCLUDE_NONGIT` | `yes` | also list folders that aren't git repos. `no` means repos only |
+| `CP_NEW_GIT` | `yes` | new projects start with `git init`. `no` to skip |
 | `CP_EDITOR` | auto | command for `ctrl-e` (cursor, code, zed…) |
 | `CP_HIDE_PROMPTS` | `no` | `yes` hides your past prompts in the preview |
 | `CP_WRAP_CLAUDE` | `yes` | `no` means only `cproj` works and `claude` is left completely alone |
@@ -138,7 +156,8 @@ Run **`claude projects doctor`** first. It checks every item below and tells you
 - **`claude projects` just starts Claude with "projects" as the prompt**: something redefines `claude` after this tool loads, such as an alias or a plugin. Move the `# >>> claude-projects >>>` block to the end of your rc file. `cproj` works regardless.
 - **Your `alias claude='claude --flags'`**: supported. The picker keeps those flags.
 - **Old fzf** (common with `apt`): the picker still works, with some features off. Upgrade with `brew upgrade fzf`.
-- **macOS asks to install "command line developer tools"**: git needs them. Run `xcode-select --install`.
+- **macOS asks to install "command line developer tools"**: git needs them. Run `xcode-select --install`. Without git, everything still works: repos show `(git not installed)` and new projects are created without history.
+- **The list is out of date** (you made a commit or ran Claude in another tab): press `ctrl-l` or `F5`.
 - **Dotfiles managers** (stow, chezmoi, a symlinked `~/.zshrc`): the installer edits through the symlink. Commit the change in your dotfiles repo so it isn't reverted.
 - **No Claude history for a repo**: history appears once you've run `claude` there. Claude Code deletes old transcripts after a while (`cleanupPeriodDays`), so older repos are sorted by last commit instead, and folders without git by when their files last changed.
 - **▶ never shows**: detection looks for a process named `claude`, or node running `@anthropic-ai/claude-code`. On macOS it needs `lsof`.

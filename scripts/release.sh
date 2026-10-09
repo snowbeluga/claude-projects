@@ -31,3 +31,11 @@ sed -i.bak -e "s#^  url \".*\"#  url \"$URL\"#" -e "s#^  sha256 \".*\"#  sha256 
 git -C "$TAP" commit -q -am "claude-projects $V"
 git -C "$TAP" push -q
 echo "Released v$V. People update with:  brew update && brew upgrade claude-projects"
+
+# Keep the maintainer's own Homebrew install current too (otherwise you'd run the old release).
+if command -v brew >/dev/null 2>&1 && brew list --formula claude-projects >/dev/null 2>&1; then
+  echo "Upgrading your own Homebrew install…"
+  brew update -q >/dev/null 2>&1 || true
+  brew upgrade claude-projects >/dev/null 2>&1 || true
+  echo "You're on: $("$(brew --prefix)/opt/claude-projects/bin/claude-projects" version)"
+fi

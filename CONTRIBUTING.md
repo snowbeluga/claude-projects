@@ -20,6 +20,15 @@ Keep everything **bash 3.2 compatible** (macOS `/bin/bash`): no associative arra
 /bin/bash tests/smoke.sh
 ```
 
+## Trying changes before a release
+
+Pushing to `main` doesn't reach anyone's Homebrew install, yours included. Only a release does. To try your working copy:
+
+```sh
+bin/claude-projects --list                      # any command, straight from the repo
+CP_HOME="$PWD" bash -c '. shell/claude-projects.sh; cproj'   # the full picker + launch, in a subshell
+```
+
 ## Releasing
 
 For maintainers with push access to both this repo and [snowbeluga/homebrew-tap](https://github.com/snowbeluga/homebrew-tap).
@@ -36,4 +45,4 @@ Then, with your changes committed on `main`:
 scripts/release.sh 1.1.0
 ```
 
-It sets `CP_VERSION`, runs the tests, tags `v1.1.0`, pushes, and updates the formula's `url` and `sha256` in the tap. Users then get it with `brew update && brew upgrade claude-projects`.
+It sets `CP_VERSION`, runs the tests, tags `v1.1.0`, pushes, and updates the formula's `url` and `sha256` in the tap. Users then get it with `brew update && brew upgrade claude-projects`. If you installed it with Homebrew yourself, the script also upgrades your copy, so you're never a release behind.

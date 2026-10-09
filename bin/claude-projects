@@ -5,6 +5,7 @@
 #   claude-projects doctor     check everything and explain what's wrong
 #   claude-projects update     pull the latest version (git installs; Homebrew: brew upgrade)
 #   claude-projects install-shell | uninstall-shell   add/remove the rc-file line (Homebrew installs)
+#   claude-projects new [name]  start a new project (also: ctrl-n in the picker)
 #   claude-projects list | ignore | unignore | ignored   plain-text commands (see: help)
 #
 # Written for bash 3.2+ (the macOS default) and GNU/BSD userlands. Requires fzf; jq optional.
@@ -39,7 +40,7 @@ SESS_ROOT="$CLAUDE_HOME/projects"
 IS_MAC=0; [ "$(uname -s)" = "Darwin" ] && IS_MAC=1
 
 # ---------------------------------------------------------------- config
-CP_KEYS="CP_ROOTS CP_DEPTH CP_INCLUDE_NONGIT CP_EDITOR CP_HIDE_PROMPTS CP_WRAP_CLAUDE CP_WORDS CP_THEME CP_ASCII CP_FZF_OPTS CP_PARALLEL"
+CP_KEYS="CP_ROOTS CP_DEPTH CP_INCLUDE_NONGIT CP_NEW_GIT CP_EDITOR CP_HIDE_PROMPTS CP_WRAP_CLAUDE CP_WORDS CP_THEME CP_ASCII CP_FZF_OPTS CP_PARALLEL"
 
 load_config() {
   local k v
@@ -48,7 +49,7 @@ load_config() {
     eval "v=\${$k+x}"
     if [ "$v" = x ]; then eval "_ENV_$k=\$$k; _HAS_$k=1"; fi
   done
-  CP_ROOTS=""; CP_DEPTH=3; CP_INCLUDE_NONGIT=yes; CP_EDITOR=""; CP_HIDE_PROMPTS=no; CP_WRAP_CLAUDE=yes
+  CP_ROOTS=""; CP_DEPTH=3; CP_INCLUDE_NONGIT=yes; CP_NEW_GIT=yes; CP_EDITOR=""; CP_HIDE_PROMPTS=no; CP_WRAP_CLAUDE=yes
   CP_WORDS="projects"; CP_THEME=auto; CP_ASCII=auto; CP_FZF_OPTS=""; CP_PARALLEL=8
   # shellcheck disable=SC1090
   [ -f "$CONF" ] && . "$CONF"
@@ -69,10 +70,10 @@ setup_style() {
   case "$CP_ASCII" in yes) utf=0 ;; no) utf=1 ;; esac
   if [ $utf = 1 ]; then
     S_SPARK="✻"; S_RUN="▶"; S_DIRTY="●"; S_PROMPT="❯"; S_PTR="▌"; S_ITEM="›"; S_GIT="⎇"; S_OK="✓"; S_BAD="✗"; S_DOT="·"; S_ENTER="↵"
-    S_UP="↑"; S_DOWN="↓"; S_DASH="—"; S_ELL="…"; S_DIR="▢"; UNICODE=1
+    S_UP="↑"; S_DOWN="↓"; S_DASH="—"; S_ELL="…"; S_DIR="▢"; S_NEW="＋"; UNICODE=1
   else
     S_SPARK="*"; S_RUN=">"; S_DIRTY="+"; S_PROMPT=">"; S_PTR=">"; S_ITEM="-"; S_GIT="git"; S_OK="ok"; S_BAD="XX"; S_DOT="|"; S_ENTER="enter"
-    S_UP="^"; S_DOWN="v"; S_DASH="-"; S_ELL="..."; S_DIR="[]"; UNICODE=0
+    S_UP="^"; S_DOWN="v"; S_DASH="-"; S_ELL="..."; S_DIR="[]"; S_NEW="+"; UNICODE=0
   fi
 
   THEME=$CP_THEME
@@ -145,6 +146,15 @@ expand_path() {
 shortpath() { case "$1" in "$HOME") printf '~' ;; "$HOME"/*) printf '~%s' "${1#"$HOME"}" ;; *) printf '%s' "$1" ;; esac; }
 lc() { if [ $IS_MAC = 1 ]; then printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; else printf '%s' "$1"; fi; }
 physical() { (cd -P "$1" 2>/dev/null && pwd) || printf '%s' "$1"; }
+
+# Is a working git installed? On a fresh Mac /usr/bin/git is only a stub that pops up an
+# "install developer tools" dialog, so don't count it (and never run it) until the tools exist.
+have_git() {
+  [ -n "${CP_FAKE_NO_GIT:-}" ] && return 1   # tests
+  command -v git >/dev/null 2>&1 || return 1
+  if [ $IS_MAC = 1 ] && [ "$(command -v git)" = /usr/bin/git ]; then xcode-select -p >/dev/null 2>&1 || return 1; fi
+  return 0
+}
 
 # git, safely: never take optional locks (Claude may be running git in the same repo),
 # never run fsmonitor or hooks from a repo's own config.
@@ -349,7 +359,11 @@ row() {
   m=$(match_sessions "$repo")
   st=$(printf '%s' "$m" | cut -f1); st=${st:-0}
   dirty=" "
-  if [ -e "$repo/.git" ]; then
+  if [ -e "$repo/.git" ] && [ "${HAVE_GIT:-1}" = 0 ]; then
+    kind=git; bcol=$GRY; branch="(git not installed)"
+    ct=$(newest_mtime "$repo"); ts=$ct; [ "$st" -gt "$ts" ] && ts=$st
+    if [ "$st" -gt 0 ]; then spark="$O2$S_SPARK$R"; else spark=" "; fi
+  elif [ -e "$repo/.git" ]; then
     kind=git; bcol=$BLU
     branch=$(g "$repo" symbolic-ref --short -q HEAD 2>/dev/null)
     if [ -z "$branch" ]; then
@@ -357,7 +371,8 @@ row() {
       branch="(${branch:-no commits})"
     fi
     [ -n "$(g "$repo" status --porcelain --untracked-files=no 2>/dev/null | head -1)" ] && dirty=$S_DIRTY
-    ct=$(g "$repo" log -1 --format=%ct 2>/dev/null); ct=${ct:-0}
+    ct=$(g "$repo" log -1 --format=%ct 2>/dev/null)
+    [ -n "$ct" ] || ct=$(newest_mtime "$repo")   # no commits yet (e.g. a brand-new project)
     # ✻ = your last activity here was through Claude (session newer than the last commit)
     if [ "$st" -gt 0 ] && [ "$st" -ge "$ct" ]; then ts=$st; spark="$O2$S_SPARK$R"; else ts=$ct; spark=" "; fi
   else
@@ -385,6 +400,9 @@ prepare_data() { # needs CP_TMP
   export CP_INDEX="$CP_TMP/index"
   build_index > "$CP_INDEX"
   CP_RUNNING=$(running_cwds); export CP_RUNNING
+  # files too, so a refresh inside fzf (ctrl-l) can update what later previews see
+  export CP_RUNNING_FILE="$CP_TMP/running"; printf '%s\n' "$CP_RUNNING" > "$CP_RUNNING_FILE"
+  if have_git; then HAVE_GIT=1; else HAVE_GIT=0; fi; export HAVE_GIT
 }
 list_rows() { # -> "path \t pretty \t kind \t claude \t last-active", most recent first
   local repos; repos=$(find_projects | cut -f2)
@@ -394,8 +412,32 @@ list_rows() { # -> "path \t pretty \t kind \t claude \t last-active", most recen
 }
 
 # ---------------------------------------------------------------- preview
+NEW_ID="+new"   # the "New project" row's path field
+
+preview_new() {
+  local first=$1 root
+  printf '%s%s New project%s\n\n' "$B$O2" "$S_NEW" "$R"
+  printf 'Make a folder, then start Claude in it.\n\n'
+  printf '%sPress enter%s on this row, or %sctrl-n%s from anywhere in the list.\n' "$B" "$R" "$B" "$R"
+  printf 'Tip: type a name in the search box first and it is used as the project name.\n\n'
+  printf '%sYou will be asked:%s\n' "$GRY" "$R"
+  printf '  %s name, e.g. recipe-app\n' "$S_ITEM"
+  printf '  %s what you want to build (optional, becomes your first message to Claude)\n' "$S_ITEM"
+  echo
+  root=$(printf '%s' "$CP_ROOTS" | cut -d: -f1)
+  [ -n "$root" ] && printf '%sCreated in%s %s\n' "$GRY" "$R" "$(shortpath "$(expand_path "$root")")"
+  if [ "$CP_NEW_GIT" = yes ]; then
+    if have_git; then printf '%sTracked with git, so any change Claude makes can be undone.%s\n' "$GRY" "$R"
+    else printf '%sgit is not installed yet. You will be offered to install it.%s\n' "$YEL" "$R"; fi
+  fi
+  if [ "$first" = 1 ]; then
+    printf '\n%sNo projects here yet.%s Start your first one, or run %sclaude projects setup%s to pick other folders.\n' "$B" "$R" "$B" "$R"
+  fi
+}
+
 preview() {
   local r=$1 m st sf cnt summ prompts ab changes br n
+  [ "$r" = "$NEW_ID" ] && { preview_new "${CP_EMPTY:-0}"; return; }
   [ -d "$r" ] || { echo "Folder no longer exists: $r"; return; }
   printf '%s%s%s\n%s%s%s\n' "$B$O2" "${r##*/}" "$R" "$GRY" "$(shortpath "$r")" "$R"
   is_running "$r" && printf '%s%s Claude is running here now%s\n' "$GRN" "$S_RUN" "$R"
@@ -481,23 +523,20 @@ pick() {
     fi
   fi
   make_tmp; prepare_data
-  local rows total running hidden out key path ed clip hints=""
+  local rows total running hidden out key path ed clip q rc hints="" newrow notnew
   rows=$(list_rows)
   hidden=$(hidden_projects | grep -c .)
-  if [ -z "$rows" ]; then
-    say "No projects found in: $(printf '%s' "$CP_ROOTS" | tr ':' ' ')"
-    [ "$hidden" -gt 0 ] && say "$hidden are hidden by ignore rules. See them with: ${B}claude-projects ignored${R}"
-    say "Run ${B}claude-projects setup${R} to change folders, or ${B}claude-projects doctor${R} to diagnose."
-    exit 1
-  fi
   total=$(printf '%s\n' "$rows" | grep -c .)
+  # No projects yet: still open, with just the "New project" row and a welcome in the preview.
+  CP_EMPTY=0; [ "$total" = 0 ] && CP_EMPTY=1; export CP_EMPTY
+  [ "$total" = 0 ] && [ "$hidden" -gt 0 ] && say "No visible projects: $hidden are hidden by ignore rules (claude-projects ignored)."
   running=$(printf '%s\n' "$rows" | grep -c -- "$S_RUN") || running=0
 
   local -a args
   args=(--ansi "--delimiter=$TAB" --with-nth=2 --layout=reverse --height=95% --border
         "--prompt=  $S_PROMPT " "--pointer=$S_PTR" --info=inline "--color=$FZF_COLORS"
         "--preview=$(printf '%q' "$SELF") --preview {1}"
-        --expect=ctrl-o,ctrl-r,ctrl-g)
+        --print-query --expect=ctrl-o,ctrl-r,ctrl-g,ctrl-n)
   fzf_has --header-first && args+=(--header-first)
   fzf_has --no-scrollbar && args+=(--no-scrollbar)
   fzf_has --border=rounded && args+=(--border=rounded)
@@ -508,17 +547,20 @@ pick() {
     args+=('--preview-window=right:55%:wrap')
   fi
 
-  hints="$(hint "$S_ENTER" new)  $(hint '^o' continue)  $(hint '^r' resume)  $(hint '^g' 'cd only')"
+  hints="$(hint "$S_ENTER" open)  $(hint '^n' 'new project')  $(hint '^o' continue)  $(hint '^r' resume)  $(hint '^g' 'cd only')"
   ed=${CP_EDITOR:-$(detect_editor)}
   if [ -n "$ed" ] && command -v "${ed%% *}" >/dev/null 2>&1; then
-    if editor_is_gui "$ed"; then args+=("--bind=ctrl-e:execute-silent($ed {1})"); else args+=("--bind=ctrl-e:execute($ed {1})"); fi
+    notnew="[ {1} = '$NEW_ID' ] ||"   # the New project row has no folder
+    if editor_is_gui "$ed"; then args+=("--bind=ctrl-e:execute-silent($notnew $ed {1})"); else args+=("--bind=ctrl-e:execute($notnew $ed {1})"); fi
     hints="$hints  $(hint '^e' editor)"
   fi
   clip=$(clipboard_cmd)
-  if [ -n "$clip" ]; then args+=("--bind=ctrl-y:execute-silent(printf %s {1} | $clip)"); hints="$hints  $(hint '^y' 'copy path')"; fi
+  if [ -n "$clip" ]; then args+=("--bind=ctrl-y:execute-silent([ {1} = '$NEW_ID' ] || printf %s {1} | $clip)"); hints="$hints  $(hint '^y' 'copy path')"; fi
   if fzf_has '--bind=ctrl-x:reload(true)'; then
-    args+=("--bind=ctrl-x:execute-silent($(printf '%q' "$SELF") ignore {1})+reload($(printf '%q' "$SELF") --list)")
-    hints="$hints  $(hint '^x' ignore)"
+    args+=("--bind=ctrl-x:execute-silent($(printf '%q' "$SELF") ignore {1})+reload($(printf '%q' "$SELF") --reload)")
+    args+=("--bind=ctrl-l:reload($(printf '%q' "$SELF") --reload)" "--bind=f5:reload($(printf '%q' "$SELF") --reload)")
+    fzf_has --track && args+=(--track)   # stay on the same project across a reload
+    hints="$hints  $(hint '^x' ignore)  $(hint '^l' refresh)"
   fi
   if fzf_has '--bind=ctrl-/:toggle-preview'; then args+=('--bind=ctrl-/:toggle-preview'); hints="$hints  $(hint '^/' preview)"
   else args+=('--bind=alt-p:toggle-preview'); hints="$hints  $(hint 'alt-p' preview)"; fi
@@ -527,18 +569,158 @@ pick() {
   local -a extra=()
   [ -n "$CP_FZF_OPTS" ] && eval "extra=($CP_FZF_OPTS)"
 
-  out=$(printf '%s\n' "$rows" | SHELL=$(command -v bash) FZF_DEFAULT_OPTS='' FZF_DEFAULT_OPTS_FILE='' \
-        fzf "${args[@]}" "${extra[@]}") || exit 1
-  key=$(printf '%s\n' "$out" | sed -n 1p)
-  path=$(printf '%s\n' "$out" | sed -n 2p | cut -f1)
-  [ -n "$path" ] || exit 1
+  out=$( { [ -n "$rows" ] && printf '%s\n' "$rows"; new_row; } \
+        | SHELL=$(command -v bash) FZF_DEFAULT_OPTS='' FZF_DEFAULT_OPTS_FILE='' fzf "${args[@]}" "${extra[@]}")
+  rc=$?
+  q=$(printf '%s\n' "$out" | sed -n 1p)
+  key=$(printf '%s\n' "$out" | sed -n 2p)
+  path=$(printf '%s\n' "$out" | sed -n 3p | cut -f1)
+  # rc 1 = enter with nothing matching the search: offer to create a project with that name
+  if [ "$key" = ctrl-n ] || [ "$path" = "$NEW_ID" ]; then new_project --for-shell ${q:+--name "$q"}; return
+  elif [ $rc = 1 ] && [ -n "$q" ] && [ -z "$key" ]; then new_project --for-shell --confirm --name "$q"; return; fi
+  [ $rc = 0 ] && [ -n "$path" ] || exit 1
   printf '%s\t%s\n' "$key" "$path"
+}
+
+new_row() { printf '%s\t  %s%s New project%s  %sctrl-n%s\tnew\tno\t\n' "$NEW_ID" "$O2$B" "$S_NEW" "$R" "$GRY" "$R"; }
+
+# ctrl-l / F5 / after ctrl-x: re-read everything, updating the files the open picker's previews use
+reload_rows() {
+  if [ -n "${CP_INDEX:-}" ] && [ -n "${CP_RUNNING_FILE:-}" ]; then
+    build_index > "$CP_INDEX.new" && mv "$CP_INDEX.new" "$CP_INDEX"
+    CP_RUNNING=$(running_cwds); export CP_RUNNING; printf '%s\n' "$CP_RUNNING" > "$CP_RUNNING_FILE"
+    if have_git; then HAVE_GIT=1; else HAVE_GIT=0; fi; export HAVE_GIT
+  else make_tmp; prepare_data; fi
+  list_rows
+  new_row
+}
+
+# ---------------------------------------------------------------- new project
+interactive() { [ -z "${CP_NO_TTY:-}" ] && ( : </dev/tty ) 2>/dev/null; }
+
+# Offer to install git (interactive). Returns 0 if git works afterwards.
+install_git() {
+  local cmd="" i=0
+  say ""
+  say "  ${YEL}git isn't installed.${R} git keeps a history of every change, so you can undo anything Claude does."
+  if [ $IS_MAC = 1 ]; then
+    yes_no "  Install Apple's Command Line Tools (includes git) now? ${GRY}free, about 5 minutes${R}" Y || return 1
+    xcode-select --install >/dev/null 2>&1
+    say "  A macOS window should open. Click ${B}Install${R} and wait for it to finish."
+    say "  ${GRY}Waiting… (press enter to continue without git for now)${R}"
+    while ! xcode-select -p >/dev/null 2>&1; do
+      [ $i -ge 900 ] && break
+      if IFS= read -r -t 2 _ </dev/tty; then break; fi
+      i=$(( i + 1 ))
+    done
+  else
+    if command -v brew >/dev/null 2>&1; then cmd="brew install git"
+    elif command -v apt-get >/dev/null 2>&1; then cmd="sudo apt-get install -y git"
+    elif command -v dnf >/dev/null 2>&1; then cmd="sudo dnf install -y git"
+    elif command -v yum >/dev/null 2>&1; then cmd="sudo yum install -y git"
+    elif command -v pacman >/dev/null 2>&1; then cmd="sudo pacman -S --noconfirm git"
+    elif command -v zypper >/dev/null 2>&1; then cmd="sudo zypper install -y git"
+    elif command -v apk >/dev/null 2>&1; then cmd="sudo apk add git"
+    fi
+    if [ -z "$cmd" ]; then say "  Install git with your package manager, then run ${B}git init${R} in the project."; return 1; fi
+    yes_no "  Install it now with: ${B}$cmd${R} ?" Y || return 1
+    eval "$cmd" </dev/tty >&2 || say "  ${RED}That didn't work.${R} Install git yourself when you can."
+  fi
+  if have_git; then say "  ${GRN}$S_OK${R} git is installed"; return 0; fi
+  return 1
+}
+
+slugify() { # "My Recipe App" -> "My-Recipe-App" (keeps case; no slashes, no leading dots)
+  printf '%s' "$1" | tr '\t/' '  ' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/[[:space:]][[:space:]]*/-/g' -e 's/^\.*//'
+}
+
+# new_project [--name N | N] [--in DIR] [--prompt TEXT] [--git|--no-git] [--yes] [--for-shell] [--confirm]
+# Interactive when there's a terminal (asks for anything missing); otherwise uses defaults.
+# --for-shell prints "new \t dir \t prompt" for the shell wrapper; otherwise prints the folder.
+new_project() {
+  local name="" in="" prompt="" git=$CP_NEW_GIT yes=0 forshell=0 confirm=0 tty=0 dir roots n i r have_prompt=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --name) name=$2; shift ;;
+      --in) in=$2; shift ;;
+      --prompt) prompt=$2; have_prompt=1; shift ;;
+      --git) git=yes ;; --no-git) git=no ;;
+      -y|--yes) yes=1 ;;
+      --for-shell) forshell=1 ;;
+      --confirm) confirm=1 ;;
+      -h|--help) echo "usage: claude-projects new [name] [--in FOLDER] [--prompt TEXT] [--no-git] [--yes]"; return 0 ;;
+      -*) die "unknown option: $1 (see: claude-projects new --help)" ;;
+      *) name=$1 ;;
+    esac
+    shift
+  done
+  [ $yes = 0 ] && interactive && tty=1
+
+  if [ -z "$CP_ROOTS" ] && [ -z "$in" ]; then
+    [ $tty = 1 ] || die "not configured yet. Run: claude-projects setup  (or pass --in FOLDER)"
+    setup || exit 1; load_config
+  fi
+  if [ $confirm = 1 ] && [ $tty = 1 ]; then
+    yes_no "  No project matches ${B}$name${R}. Start a new project called that?" Y || exit 1
+  fi
+  [ $tty = 1 ] && say "" && say "  ${O2}${B}${S_NEW} New project${R}"
+
+  # name
+  if [ -z "$name" ] && [ $tty = 1 ]; then ask "  Project name" ""; name=$REPLY; fi
+  name=$(slugify "$name")
+  [ -n "$name" ] || die "a project needs a name, e.g.: claude-projects new recipe-app"
+
+  # where
+  if [ -n "$in" ]; then in=$(expand_path "$in"); in=${in%/}
+  else
+    roots=$(printf '%s\n' "$CP_ROOTS" | tr ':' '\n' | while IFS= read -r r; do [ -n "$r" ] && expand_path "$r" && echo; done)
+    n=$(printf '%s\n' "$roots" | grep -c .)
+    in=$(printf '%s\n' "$roots" | sed -n 1p)
+    if [ "$n" -gt 1 ] && [ $tty = 1 ]; then
+      say "  Where should it go?"
+      i=0; while IFS= read -r r; do i=$((i+1)); say "   $i) $(shortpath "$r")"; done <<EOF
+$roots
+EOF
+      ask "  Number" 1
+      case "$REPLY" in *[!0-9]*|'') ;; *) [ "$REPLY" -ge 1 ] && [ "$REPLY" -le "$n" ] && in=$(printf '%s\n' "$roots" | sed -n "${REPLY}p") ;; esac
+    fi
+  fi
+  [ -n "$in" ] || die "no folder to create it in. Run: claude-projects setup"
+  dir="$in/$name"
+
+  if [ -e "$dir" ]; then
+    if [ $tty = 1 ] && [ -d "$dir" ] && yes_no "  ${B}$(shortpath "$dir")${R} already exists. Open it instead?" Y; then
+      if [ $forshell = 1 ]; then printf '\t%s\n' "$dir"; else printf '%s\n' "$dir"; fi
+      return 0
+    fi
+    die "$(shortpath "$dir") already exists"
+  fi
+
+  # first message to Claude
+  if [ $have_prompt = 0 ] && [ $tty = 1 ] && [ $forshell = 1 ]; then
+    ask "  What do you want to build? ${GRY}(optional, Claude starts with this; enter to skip)${R}" ""
+    prompt=$REPLY
+  fi
+  prompt=$(printf '%s' "$prompt" | tr '\t\n' '  ')
+
+  mkdir -p "$dir" || die "couldn't create $(shortpath "$dir")"
+  if [ "$git" = yes ]; then
+    if have_git || { [ $tty = 1 ] && install_git; }; then
+      git -C "$dir" init -q -b main 2>/dev/null || git -C "$dir" init -q
+      say "  ${GRN}$S_OK${R} created ${B}$(shortpath "$dir")${R} (git)"
+    else
+      say "  ${GRN}$S_OK${R} created ${B}$(shortpath "$dir")${R} ${GRY}(without git: install git, then run git init there)${R}"
+    fi
+  else
+    say "  ${GRN}$S_OK${R} created ${B}$(shortpath "$dir")${R}"
+  fi
+  if [ $forshell = 1 ]; then printf 'new\t%s\t%s\n' "$dir" "$prompt"; else printf '%s\n' "$dir"; fi
 }
 
 # ---------------------------------------------------------------- setup
 ask() { # ask "Question" default -> REPLY
   local q=$1 d=$2
-  printf '%s %s[%s]%s ' "$q" "$GRY" "$d" "$R" >&2
+  if [ -n "$d" ]; then printf '%s %s[%s]%s ' "$q" "$GRY" "$d" "$R" >&2; else printf '%s ' "$q" >&2; fi
   IFS= read -r REPLY </dev/tty || REPLY=""
   [ -z "$REPLY" ] && REPLY=$d
 }
@@ -601,13 +783,27 @@ EOF
       else sel=$(for c in $REPLY; do printf '%s\n' "$display" | sed -n "${c}p" | cut -f1; done); fi
     fi
   else
-    say "  ${YEL}No git repos found automatically.${R} Type the folder(s) where you keep your projects below, e.g. ~/projects"
+    say "  ${YEL}No existing git repos found.${R} That's fine: pick a folder for your projects and start one from the picker."
   fi
 
-  ask "  Any other folders to include? (space-separated, Enter to skip)" ""
+  local suggested="" made
+  if [ -n "$sel" ]; then ask "  Any other folders to include? (space-separated, Enter to skip)" ""
+  else
+    # One question covers all three cases: use an existing folder, create one, or take the suggestion.
+    suggested="~/projects"
+    say "  Where should your projects live?"
+    if [ -d "$HOME/projects" ]; then say "  ${GRY}Press enter to use ~/projects, or type another folder (existing or new).${R}"
+    else say "  ${GRY}Press enter to create ~/projects, or type a different name or an existing folder.${R}"; fi
+    ask "  Folder" "$suggested"
+  fi
   manual=$REPLY
   for p in $manual; do
+    made=0
+    [ "$p" = "$suggested" ] && [ ! -e "$(expand_path "$p")" ] && made=1   # the suggestion: no need to ask twice
     p=$(expand_path "$p"); p=${p%/}
+    if [ ! -e "$p" ] && { [ $made = 1 ] || yes_no "  $(shortpath "$p") doesn't exist yet. Create it?" Y; }; then
+      mkdir -p "$p" && say "  ${GRN}$S_OK${R} created $(shortpath "$p")" || say "  ${RED}couldn't create $p${R}"
+    fi
     if [ -d "$p" ]; then sel=$(printf '%s\n%s' "$sel" "$p"); else say "  ${YEL}skipping $p (not a folder)${R}"; fi
   done
 
@@ -640,6 +836,8 @@ EOF
     printf 'CP_DEPTH=%s\n' "$depth"
     echo "# yes = also list folders that aren't git repos (directly inside a root, or where you've used Claude)"
     printf 'CP_INCLUDE_NONGIT=%s\n' "$nongit"
+    echo "# yes = new projects (ctrl-n) start with git init"
+    printf 'CP_NEW_GIT=%s\n' "$CP_NEW_GIT"
     echo "# Command for ctrl-e (empty = auto-detect)"
     printf 'CP_EDITOR="%s"\n' "$ed"
     echo "# yes = hide your past prompts in the preview (handy when screen-sharing)"
@@ -690,7 +888,9 @@ doctor() {
   else bad "fzf not found — required. Install: brew install fzf"; fi
   if command -v jq >/dev/null 2>&1; then ok "jq $(jq --version 2>/dev/null | sed 's/^jq-//')"
   else warn "jq not found — the preview can't show your recent prompts. Install: brew install jq"; fi
-  if command -v git >/dev/null 2>&1; then ok "git $(git --version | awk '{print $3}')"; else bad "git not found"; fi
+  if have_git; then ok "git $(git --version | awk '{print $3}')"
+  elif [ $IS_MAC = 1 ]; then warn "git isn't installed — folders still work, but repos show no branch and new projects can't track changes. Install: xcode-select --install"
+  else warn "git isn't installed — folders still work, but repos show no branch and new projects can't track changes. Install it with your package manager"; fi
   if command -v claude >/dev/null 2>&1; then
     v=$(claude --version 2>/dev/null | head -1)
     ok "Claude Code ${v:-found} ($(shortpath "$(command -v claude)"))"
@@ -886,6 +1086,7 @@ ignore_cmd() {
 EOF
   fi
   for a in "$@"; do
+    [ "$a" = "$NEW_ID" ] && continue
     rule=$(to_rule "$a") || { echo "no such folder: $a (use a full path, or a bare folder name)" >&2; continue; }
     if grep -qxF -- "$rule" "$IGNORE_FILE"; then echo "already ignored: $rule"; continue; fi
     printf '%s\n' "$rule" >> "$IGNORE_FILE"
@@ -922,6 +1123,7 @@ usage() {
 claude-projects $CP_VERSION — jump between projects and Claude Code sessions
 
   claude projects                 open the picker (same as: cproj)
+  claude projects new [name]      start a new project: makes the folder, git init, opens Claude
   claude projects setup           choose folders, editor, privacy
   claude projects doctor          check your install and explain problems
   claude projects update          update (Homebrew installs: brew upgrade claude-projects)
@@ -935,11 +1137,15 @@ Code (or any shell that skips your rc file) use the hyphenated form: claude-proj
   claude-projects ignore <path|name|pattern>...  hide projects, e.g. ~/code/old-thing  scratch  '*-backups'
   claude-projects unignore <rule|path>...        show them again
   claude-projects ignored                        list ignore rules and what each one hides
+  claude-projects new <name> [--in FOLDER] [--prompt TEXT] [--no-git]
+                                                 create a project folder and print its path
 
 In the picker:
   enter  new session       ctrl-o continue last session   ctrl-r pick a past session
   ctrl-g just cd there     ctrl-e open in editor          ctrl-y copy path
-  ctrl-x ignore project    ctrl-/ toggle preview          esc    cancel
+  ctrl-n new project       ctrl-x ignore project          ctrl-l refresh (also F5)
+  ctrl-/ toggle preview    esc    cancel
+  "＋ New project" is also the last row. Type a name that matches nothing + enter to create it.
 
 Anything else after "claude projects" is passed to Claude, e.g. claude projects --model opus
 
@@ -968,11 +1174,14 @@ case "${1:-}" in
   ignore)           shift; ignore_cmd "$@" ;;
   unignore)         shift; unignore_cmd "$@" ;;
   ignored)          ignored_cmd ;;
+  new)              shift; new_project "$@" ;;
   version|--version|-v) echo "claude-projects $CP_VERSION" ;;
   help|--help|-h)   usage ;;
   --list)           make_tmp; prepare_data; list_rows ;;
-  --row)            row "$2" ;;
-  --preview)        [ -n "${CP_INDEX:-}" ] || { make_tmp; prepare_data; }   # standalone use, outside fzf
+  --reload)         reload_rows ;;
+  --row)            [ -f "${CP_RUNNING_FILE:-}" ] && CP_RUNNING=$(cat "$CP_RUNNING_FILE"); row "$2" ;;
+  --preview)        [ -f "${CP_RUNNING_FILE:-}" ] && CP_RUNNING=$(cat "$CP_RUNNING_FILE")
+                    [ -n "${CP_INDEX:-}" ] || { make_tmp; prepare_data; }   # standalone use, outside fzf
                     preview "$2" ;;
   *)                usage >&2; exit 2 ;;
 esac

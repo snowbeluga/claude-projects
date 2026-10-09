@@ -2,6 +2,7 @@
 # install.sh adds one line to your rc file that sources this. Don't paste it in by hand.
 #
 #   cproj                  open the picker (always available)
+#   cproj new [name]       start a new project
 #   claude projects        same thing, if CP_WRAP_CLAUDE=yes (the default)
 #   claude <anything else> goes straight to Claude Code, untouched
 
@@ -44,25 +45,44 @@ _cp_claude() {
   fi
 }
 
-_cp_pick() {
-  local out key dir
-  [ -x "$_CP_BIN" ] || { echo "claude-projects: not installed at $CP_HOME (re-run install.sh)" >&2; return 2; }
-  out=$("$_CP_BIN") || return $?
+# $1 = what the picker printed: "key \t dir" or, for a new project, "new \t dir \t first-prompt".
+# The rest of the arguments go to Claude.
+_cp_launch() {
+  local out=$1 key dir rest prompt=""
+  shift
   key=${out%%$'\t'*}
-  dir=${out#*$'\t'}
+  rest=${out#*$'\t'}
+  dir=${rest%%$'\t'*}
+  [ "$rest" != "$dir" ] && prompt=${rest#*$'\t'}
   [ -d "$dir" ] || { echo "claude-projects: folder not found: $dir" >&2; return 1; }
   cd "$dir" || return
   case "$key" in
     ctrl-o) _cp_claude -c "$@" ;;        # continue the last session
     ctrl-r) _cp_claude --resume "$@" ;;  # choose a past session
     ctrl-g) ;;                           # just cd
+    new)    if [ -n "$prompt" ]; then _cp_claude "$@" "$prompt"; else _cp_claude "$@"; fi ;;  # new project
     *)      _cp_claude "$@" ;;           # fresh session
   esac
+}
+
+_cp_pick() {
+  local out
+  [ -x "$_CP_BIN" ] || { echo "claude-projects: not installed at $CP_HOME (re-run install.sh)" >&2; return 2; }
+  out=$("$_CP_BIN") || return $?
+  _cp_launch "$out" "$@"
+}
+
+# claude projects new [name] [--prompt …]: create it, then open Claude there
+_cp_new() {
+  local out
+  out=$("$_CP_BIN" new --for-shell "$@") || return $?
+  _cp_launch "$out"
 }
 
 _cp_dispatch() {
   case "${1:-}" in
     setup|doctor|update|help|--help|-h|version|--version|list|ignore|unignore|ignored|install-shell|uninstall-shell) "$_CP_BIN" "$@" ;;
+    new) shift; _cp_new "$@" ;;
     *) _cp_pick "$@" ;;
   esac
 }
