@@ -62,7 +62,7 @@ _cp_pick() {
 
 _cp_dispatch() {
   case "${1:-}" in
-    setup|doctor|update|help|--help|-h|version|--version|list|ignore|unignore|ignored) "$_CP_BIN" "$@" ;;
+    setup|doctor|update|help|--help|-h|version|--version|list|ignore|unignore|ignored|install-shell|uninstall-shell) "$_CP_BIN" "$@" ;;
     *) _cp_pick "$@" ;;
   esac
 }

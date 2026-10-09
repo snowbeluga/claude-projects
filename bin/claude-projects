@@ -921,29 +921,34 @@ usage() {
   cat <<EOF
 claude-projects $CP_VERSION — jump between projects and Claude Code sessions
 
-  claude projects        open the picker      (or: cproj)
-  claude projects setup  choose folders, editor, privacy
-  claude projects doctor check your install and explain problems
-  claude projects update update to the latest version
-  claude-projects install-shell    add the line to ~/.zshrc / ~/.bashrc (needed once after brew install)
-  claude-projects uninstall-shell  remove that line again
+  claude projects                 open the picker (same as: cproj)
+  claude projects setup           choose folders, editor, privacy
+  claude projects doctor          check your install and explain problems
+  claude projects update          update (Homebrew installs: brew upgrade claude-projects)
+  claude projects install-shell   add the line to ~/.zshrc / ~/.bashrc (once, after brew install)
+  claude projects uninstall-shell remove that line again
 
-Plain-text commands (fine to run from scripts, or to ask Claude to run for you):
-  claude-projects list [--all]                  every project: kind (git/folder), Claude used, last active
-                                                --all also shows ignored projects and the rule hiding each
-  claude-projects ignore <path|name|pattern>... hide projects, e.g. ~/code/old-thing  scratch  '*-backups'
-  claude-projects unignore <rule|path>...       show them again
-  claude-projects ignored                       list ignore rules and what each one hides
+Plain-text commands. They never prompt, so scripts and Claude can run them. Inside Claude
+Code (or any shell that skips your rc file) use the hyphenated form: claude-projects <command>
+  claude-projects list [--all]                   every project: kind (git/folder), Claude used, last active
+                                                 --all adds ignored projects and the rule hiding each
+  claude-projects ignore <path|name|pattern>...  hide projects, e.g. ~/code/old-thing  scratch  '*-backups'
+  claude-projects unignore <rule|path>...        show them again
+  claude-projects ignored                        list ignore rules and what each one hides
 
 In the picker:
   enter  new session       ctrl-o continue last session   ctrl-r pick a past session
   ctrl-g just cd there     ctrl-e open in editor          ctrl-y copy path
   ctrl-x ignore project    ctrl-/ toggle preview          esc    cancel
 
+Anything else after "claude projects" is passed to Claude, e.g. claude projects --model opus
+
 Projects are git repos, plus (CP_INCLUDE_NONGIT=yes) folders directly inside your project
 folders and folders where you've used Claude. Non-git ones show "no git".
 
-Config: $(shortpath "$CONF")     Ignore rules: $(shortpath "$IGNORE_FILE")
+Config:       $(shortpath "$CONF")
+Ignore rules: $(shortpath "$IGNORE_FILE")
+Docs:         https://github.com/snowbeluga/claude-projects
 EOF
 }
 

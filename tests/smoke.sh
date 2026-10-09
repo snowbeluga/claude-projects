@@ -188,8 +188,10 @@ if command -v zsh >/dev/null 2>&1; then
   check "wrapper runs the brew copy; update says brew upgrade" 'printf "%s" "$W" | grep -q "claude-projects 1" && printf "%s" "$W" | grep -q "brew upgrade claude-projects"'
 fi
 check "doctor knows it's Homebrew" '"$BR/bin/claude-projects" doctor 2>&1 | grep -q "opt/claude-projects/libexec (Homebrew)"'
-"$BR/bin/claude-projects" uninstall-shell 2>/dev/null
-check "uninstall-shell removes the hook, leaves brew's files" '! grep -q claude-projects "$HOME/.zshrc" && [ -x "$K/libexec/bin/claude-projects" ]'
+if command -v zsh >/dev/null 2>&1; then   # through the wrapper: claude projects uninstall-shell
+  (cd "$T" && ZDOTDIR=$HOME zsh -c 'source ~/.zshrc; claude projects uninstall-shell' >/dev/null 2>&1)
+else "$BR/bin/claude-projects" uninstall-shell 2>/dev/null; fi
+check "claude projects uninstall-shell removes the hook, leaves brew's files" '! grep -q claude-projects "$HOME/.zshrc" && [ -x "$K/libexec/bin/claude-projects" ]'
 "$K/libexec/uninstall.sh" --yes 2>/dev/null
 check "uninstall.sh inside brew never deletes brew's files" '[ -x "$K/libexec/bin/claude-projects" ]'
 

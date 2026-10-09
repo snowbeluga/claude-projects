@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # uninstall.sh — remove claude-projects.
-#   ./uninstall.sh           remove the shell hook, the command link and the installed files (keeps your config)
-#   ./uninstall.sh --purge   also delete your config
-#   ./uninstall.sh --yes     don't ask
+#   ./uninstall.sh                remove the shell hook, the command link and the installed files (keeps your config)
+#   ./uninstall.sh --purge        also delete your config
+#   ./uninstall.sh --yes          don't ask
 #   ./uninstall.sh --shell-only   only remove the shell hook (what `claude-projects uninstall-shell` runs)
 # Homebrew installs: files are left to `brew uninstall claude-projects`.
 

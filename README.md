@@ -9,13 +9,12 @@ A terminal picker for jumping between your projects and Claude Code sessions.
   12 projects · 1 running · ✻ Claude session · ● uncommitted
   ↵ new  ^o continue  ^r resume  ^g cd only  ^e editor  ^y copy path  ^x ignore  ^/ preview
   ❯
-▌ ▶ identity-api      feat/token-refresh   ●   2h ago ✻    │ identity-api
-    pra-console       main                     1d ago ✻    │ ✻ CLAUDE  last session 2h ago · 14 total
-    docs-site         main                     3w ago      │   Refactor token refresh flow
-    research-notes    no git                   1mo ago ✻   │
-                                                           │   › fix the refresh bug in auth middleware
-                                                           │   › now add tests for the expiry edge case
-                                                           │ ⎇ GIT  feat/token-refresh  ↑2  3 changed
+▌ ▶ identity-api      feat/token-refresh   ●  2h ago ✻   │ identity-api
+    pra-console       main                    1d ago ✻   │ ✻ CLAUDE  last session 2h ago · 14 total
+    research-notes    no git                  1w ago ✻   │   Refactor token refresh flow
+    docs-site         main                    3w ago     │   › fix the refresh bug in auth middleware
+                                                         │   › now add tests for the expiry edge case
+                                                         │ ⎇ GIT  feat/token-refresh  ↑2  3 changed
 ```
 
 Type `claude projects` (or `cproj`). You get your projects sorted by what you touched most recently, with a preview of what you last asked Claude in each one. Pick one and you're in a Claude session there.
@@ -28,30 +27,39 @@ Every other `claude …` command goes straight to Claude Code, unchanged.
 
 You need macOS or Linux with zsh or bash, and [Claude Code](https://docs.claude.com/en/docs/claude-code).
 
-**With Homebrew** (recommended):
+### With Homebrew (recommended, macOS or Linux)
 
 ```sh
 brew install snowbeluga/tap/claude-projects
 claude-projects install-shell
 ```
 
-Homebrew installs `fzf` and `jq` for you. `install-shell` then does the one thing Homebrew can't: it hooks the tool into your shell.
+`brew install` puts the tool on your PATH and installs `fzf` and `jq`. Homebrew never edits shell config, so `install-shell` does that step:
 
-**Without Homebrew:**
+- adds **one line** to your `~/.zshrc` and/or `~/.bashrc`, after making a backup (`*.claude-projects.bak`)
+- asks which folders your projects live in (skipped if you already have a config)
+- runs `claude projects doctor` to confirm everything works
+
+### Without Homebrew
 
 ```sh
 git clone https://github.com/snowbeluga/claude-projects.git ~/.local/share/claude-projects
 ~/.local/share/claude-projects/install.sh
 ```
 
-Either way, the installer:
+The installer does the same three steps as `install-shell`. It also checks for `fzf` (required) and `jq` (optional), and offers to install them for you if you have Homebrew.
 
-- checks for `fzf` (required) and `jq` (optional), and offers to install them with Homebrew (git installs)
-- adds **one line** to your `~/.zshrc` / `~/.bashrc`, after making a backup
-- asks which folders your projects live in
-- runs `claude projects doctor` to confirm everything works
+**Either way, open a new terminal tab when it finishes**, then run `claude projects`.
 
-When it finishes, **open a new terminal tab** and run `claude projects`.
+### Switching from a git install to Homebrew
+
+```sh
+brew install snowbeluga/tap/claude-projects
+"$(brew --prefix)/opt/claude-projects/bin/claude-projects" install-shell   # full path, just this once
+rm -rf ~/.local/share/claude-projects                                      # the old copy
+```
+
+You need the full path the first time because the old `~/.local/bin/claude-projects` comes earlier on your PATH. `install-shell` removes it and points your rc file at Homebrew's copy. Your config and ignore rules are kept.
 
 > On macOS the folder scan may trigger *"Terminal would like to access files in your Documents folder"*. Allow it if your code lives there.
 
@@ -69,7 +77,7 @@ When it finishes, **open a new terminal tab** and run `claude projects`.
 | `ctrl-/` | show or hide the preview (handy when screen-sharing) |
 | `esc` | cancel |
 
-Anything after `projects` is passed to Claude. For example, `claude projects --model opus` starts the chosen session with that flag.
+Anything else after `projects` is passed to Claude. For example, `claude projects --model opus` starts the chosen session with that flag. The words in the table below are commands rather than Claude arguments.
 
 | Command | |
 |---|---|
@@ -80,7 +88,10 @@ Anything after `projects` is passed to Claude. For example, `claude projects --m
 | `claude projects ignore <path\|name\|pattern>` | hide projects |
 | `claude projects unignore <rule\|path>` | show them again |
 | `claude projects ignored` | the ignore rules, and what each one hides |
+| `claude projects install-shell` | add the line to your rc file (needed once after `brew install`) |
+| `claude projects uninstall-shell` | remove that line again |
 | `cproj …` | same as `claude projects …`, and always available |
+| `claude-projects …` | the command itself, on your PATH. Use it in scripts, or anywhere the shell functions aren't loaded |
 
 **Symbols:** ▶ Claude is running there now · ✻ you were last active there through Claude (for `no git` folders: you've used Claude there) · ● uncommitted changes.
 
@@ -98,7 +109,7 @@ Missing something? `claude projects ignored` lists every rule and what it hides,
 
 The rules live in `~/.config/claude-projects/ignore`, one per line, so you can also edit the file directly.
 
-**Or ask Claude.** These commands are plain text and never prompt, so Claude Code can run them for you. For example: *"hide my backup folders from claude-projects"* or *"why isn't intel-brief showing up in claude projects?"* Claude can run `claude-projects help` to see the commands.
+**Or ask Claude.** These commands print plain text and never prompt, so Claude Code can run them for you. For example: *"hide my backup folders from claude-projects"* or *"why isn't intel-brief showing up in claude projects?"* Claude runs commands in a shell that doesn't load your rc file, so it has to use the hyphenated `claude-projects` (for example `claude-projects ignored`), not `claude projects`. `claude-projects help` lists everything.
 
 ## Config
 
@@ -121,6 +132,8 @@ Settings live in `~/.config/claude-projects/config`. `setup` writes the file, an
 
 Run **`claude projects doctor`** first. It checks every item below and tells you what to do.
 
+- **`claude projects` or `cproj` isn't found after installing**: open a new terminal tab. With Homebrew, make sure you ran `claude-projects install-shell`.
+- **`install-shell` prints usage, or "unknown command"**: an older copy of `claude-projects` is earlier on your PATH. Run it by full path: `"$(brew --prefix)/opt/claude-projects/bin/claude-projects" install-shell`.
 - **"No projects found"**, or a project is missing: run `claude projects ignored` in case a rule hides it. Otherwise run `claude projects setup` and pick the right folders, or raise `CP_DEPTH` if your repos sit deeper than 3 levels. A folder that only contains other repos (like `~/code/my-org/`) is treated as a group, not a project.
 - **`claude projects` just starts Claude with "projects" as the prompt**: something redefines `claude` after this tool loads, such as an alias or a plugin. Move the `# >>> claude-projects >>>` block to the end of your rc file. `cproj` works regardless.
 - **Your `alias claude='claude --flags'`**: supported. The picker keeps those flags.
@@ -136,15 +149,17 @@ Run **`claude projects doctor`** first. It checks every item below and tells you
 - It only **reads** `~/.claude/projects`. It never changes your sessions.
 - The preview shows your recent prompts. Set `CP_HIDE_PROMPTS=yes`, or press `ctrl-/`, before sharing your screen.
 - Git runs with optional locks off (so it never competes with a Claude session running git in the same repo), and with the repo's fsmonitor and hooks disabled.
-- Nothing is sent anywhere. No network access except `update`, which runs `git pull`.
+- Nothing is sent anywhere. The only network access is `update` on git installs, which runs `git pull`.
+- The preview reads Claude Code's local session files (`~/.claude/projects/*/*.jsonl`). That format is internal to Claude Code and may change. If it does, the preview degrades (no prompt history) rather than breaking, and `doctor` flags it.
 
 ## Update / uninstall
 
 With Homebrew:
 
 ```sh
-brew upgrade claude-projects
-claude-projects uninstall-shell && brew uninstall claude-projects
+brew update && brew upgrade claude-projects             # update
+claude-projects uninstall-shell                         # remove the rc-file line
+brew uninstall claude-projects                          # remove the tool (your config in ~/.config/claude-projects stays)
 ```
 
 With a git install:
@@ -157,16 +172,28 @@ claude projects update                                  # git pull + re-install
 
 ## Develop
 
-`tests/smoke.sh` runs the whole flow in a throwaway `$HOME` with stub `fzf` and `claude` binaries: listing, preview, picker, non-git folders, ignore rules, install twice, wrapper, doctor, uninstall. It never touches your real setup.
+`tests/smoke.sh` runs the whole flow in a throwaway `$HOME` with stub `fzf` and `claude` binaries: listing, preview, picker, non-git folders, ignore rules, install twice, wrapper, doctor, uninstall, and a fake Homebrew layout. It never touches your real setup. The scripts must stay compatible with bash 3.2 (macOS `/bin/bash`), so run the tests with that too:
 
 ```sh
-tests/smoke.sh
+/bin/bash tests/smoke.sh
 ```
 
-To release, run `scripts/release.sh 1.1.0`. It sets the version, runs the tests, tags and pushes, then updates the formula in [snowbeluga/homebrew-tap](https://github.com/snowbeluga/homebrew-tap) (cloned next to this repo).
+### Releasing
+
+Releases are git tags, and the Homebrew formula points at the tag's tarball. One-time setup: clone the tap next to this repo.
+
+```sh
+git clone https://github.com/snowbeluga/homebrew-tap.git ../homebrew-tap
+```
+
+Then, with your changes committed on `main`:
+
+```sh
+scripts/release.sh 1.1.0
+```
+
+It sets `CP_VERSION`, runs the tests, tags `v1.1.0`, pushes, and updates the formula's `url` and `sha256` in the tap. Users then get it with `brew update && brew upgrade claude-projects`.
 
 ## License
 
-MIT
-
-Note: the preview reads Claude Code's local session files (`~/.claude/projects/*/*.jsonl`). That format is internal to Claude Code and may change. If it does, the preview degrades (no prompt history) rather than breaking, and `doctor` flags it.
+[MIT](LICENSE)
