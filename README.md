@@ -26,16 +26,27 @@ Every other `claude …` command goes straight to Claude Code, unchanged.
 
 ## Install
 
-You need access to this repo, plus macOS or Linux with zsh or bash.
+You need macOS or Linux with zsh or bash, and [Claude Code](https://docs.claude.com/en/docs/claude-code).
+
+**With Homebrew** (recommended):
+
+```sh
+brew install snowbeluga/tap/claude-projects
+claude-projects install-shell
+```
+
+Homebrew installs `fzf` and `jq` for you. `install-shell` then does the one thing Homebrew can't: it hooks the tool into your shell.
+
+**Without Homebrew:**
 
 ```sh
 git clone https://github.com/snowbeluga/claude-projects.git ~/.local/share/claude-projects
 ~/.local/share/claude-projects/install.sh
 ```
 
-The installer:
+Either way, the installer:
 
-- checks for `fzf` (required) and `jq` (optional), and offers to install them with Homebrew
+- checks for `fzf` (required) and `jq` (optional), and offers to install them with Homebrew (git installs)
 - adds **one line** to your `~/.zshrc` / `~/.bashrc`, after making a backup
 - asks which folders your projects live in
 - runs `claude projects doctor` to confirm everything works
@@ -64,7 +75,7 @@ Anything after `projects` is passed to Claude. For example, `claude projects --m
 |---|---|
 | `claude projects setup` | choose folders, editor, privacy settings |
 | `claude projects doctor` | check the install and explain any problems |
-| `claude projects update` | update to the latest version |
+| `claude projects update` | update to the latest version (Homebrew installs: `brew upgrade claude-projects`) |
 | `claude projects list [--all]` | plain list of projects. `--all` includes ignored ones |
 | `claude projects ignore <path\|name\|pattern>` | hide projects |
 | `claude projects unignore <rule\|path>` | show them again |
@@ -129,6 +140,15 @@ Run **`claude projects doctor`** first. It checks every item below and tells you
 
 ## Update / uninstall
 
+With Homebrew:
+
+```sh
+brew upgrade claude-projects
+claude-projects uninstall-shell && brew uninstall claude-projects
+```
+
+With a git install:
+
 ```sh
 claude projects update                                  # git pull + re-install
 ~/.local/share/claude-projects/uninstall.sh             # keeps your config
@@ -142,5 +162,11 @@ claude projects update                                  # git pull + re-install
 ```sh
 tests/smoke.sh
 ```
+
+To release, run `scripts/release.sh 1.1.0`. It sets the version, runs the tests, tags and pushes, then updates the formula in [snowbeluga/homebrew-tap](https://github.com/snowbeluga/homebrew-tap) (cloned next to this repo).
+
+## License
+
+MIT
 
 Note: the preview reads Claude Code's local session files (`~/.claude/projects/*/*.jsonl`). That format is internal to Claude Code and may change. If it does, the preview degrades (no prompt history) rather than breaking, and `doctor` flags it.

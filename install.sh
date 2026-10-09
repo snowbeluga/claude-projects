@@ -5,6 +5,7 @@
 #   ./install.sh --yes           accept defaults (installs fzf/jq with Homebrew if missing)
 #   ./install.sh --shell=zsh     only hook into zsh  (zsh | bash | both)
 #   ./install.sh --no-deps --no-setup --no-shell --quiet
+# Homebrew installs run this through:  claude-projects install-shell
 
 YES=0; DEPS=1; SETUP=1; SHELLS=auto; QUIET=0; HOOK=1
 for a in "$@"; do
@@ -21,6 +22,12 @@ for a in "$@"; do
 done
 
 SRC=$(cd "$(dirname "$0")" && pwd -P)
+# Installed by Homebrew? Then brew owns the files and the command; we only hook the shell,
+# pointing at brew's stable opt/ path (not the versioned Cellar one).
+BREW_MODE=0
+case "$SRC" in */Cellar/claude-projects/*/libexec)
+  BREW_MODE=1; CP_HOME="${CP_HOME:-${SRC%%/Cellar/*}/opt/claude-projects/libexec}" ;;
+esac
 CP_HOME="${CP_HOME:-$HOME/.local/share/claude-projects}"
 BIN_DIR="$HOME/.local/bin"
 CONF="${XDG_CONFIG_HOME:-$HOME/.config}/claude-projects/config"
@@ -101,6 +108,17 @@ else warn "Claude Code (claude) isn't on PATH — install it before using the pi
 
 # ------------------------------------------------------------------ files
 step "Installing files"
+LINK="$BIN_DIR/claude-projects"
+if [ $BREW_MODE = 1 ]; then
+  ok "installed by Homebrew ($(short "$CP_HOME"))"
+  # a link left by an earlier git install would shadow brew's command on PATH
+  if [ -L "$LINK" ]; then
+    case "$(readlink "$LINK")" in
+      "$HOME/.local/share/claude-projects/"*) rm -f "$LINK" && note "removed $(short "$LINK") from an earlier git install (brew provides the command now)" ;;
+    esac
+  fi
+  [ -d "$HOME/.local/share/claude-projects" ] && note "an earlier copy is still in ~/.local/share/claude-projects — safe to delete"
+else
 mkdir -p "$CP_HOME" "$BIN_DIR" || { fail "couldn't create $CP_HOME"; exit 1; }
 DEST=$(cd "$CP_HOME" && pwd -P)
 if [ "$SRC" != "$DEST" ]; then
@@ -115,12 +133,12 @@ else
 fi
 chmod +x "$CP_HOME/bin/claude-projects" "$CP_HOME/install.sh" "$CP_HOME/uninstall.sh" 2>/dev/null
 
-LINK="$BIN_DIR/claude-projects"
 if [ -e "$LINK" ] && [ ! -L "$LINK" ]; then
   mv "$LINK" "$LINK.old" && note "moved an older claude-projects script to $(short "$LINK.old")"
 fi
 ln -sf "$CP_HOME/bin/claude-projects" "$LINK" && ok "linked $(short "$LINK")"
 case ":$PATH:" in *":$BIN_DIR:"*) ;; *) note "$(short "$BIN_DIR") isn't on your PATH — fine, cproj and 'claude projects' don't need it" ;; esac
+fi
 
 # ------------------------------------------------------------------ v0 migration
 # The hand-installed version kept its folders in CLAUDE_PROJECT_ROOTS inside the rc block.
@@ -146,7 +164,7 @@ strip_block() { # remove every claude-projects block from $1 (writes in place, k
   rm -f "$tmp"
 }
 add_block() {
-  local rc=$1 home_rel
+  local rc=$1 home_rel remove
   [ -e "$rc" ] || : > "$rc"
   if [ ! -w "$rc" ]; then fail "$(short "$rc") isn't writable — add this line yourself: . \"$CP_HOME/shell/claude-projects.sh\""; return 1; fi
   cp "$rc" "$rc.claude-projects.bak" 2>/dev/null
@@ -156,7 +174,8 @@ add_block() {
   [ -s "$rc" ] && [ "$(tail -c 1 "$rc" | od -An -c | tr -d ' ')" != '\n' ] && printf '\n' >> "$rc"
   {
     echo "$MARK_START"
-    echo "# Added by claude-projects. Remove with: $home_rel/uninstall.sh"
+    if [ $BREW_MODE = 1 ]; then remove="claude-projects uninstall-shell"; else remove="$home_rel/uninstall.sh"; fi
+    echo "# Added by claude-projects. Remove with: $remove"
     [ "$CP_HOME" != "$HOME/.local/share/claude-projects" ] && echo "export CP_HOME=\"$home_rel\""
     echo "[ -f \"$home_rel/shell/claude-projects.sh\" ] && . \"$home_rel/shell/claude-projects.sh\""
     echo "$MARK_END"
@@ -223,7 +242,8 @@ fi
 
 if [ $QUIET = 0 ]; then
   printf '\n%s✻ Done.%s Open a %snew terminal tab%s, then run:  %sclaude projects%s   (or %scproj%s)\n' "$O$B" "$R" "$B" "$R" "$B" "$R" "$B" "$R" >&2
-  printf '  %sProblems? claude projects doctor   ·   Remove: %s/uninstall.sh%s\n\n' "$D" "$(short "$CP_HOME")" "$R" >&2
+  if [ $BREW_MODE = 1 ]; then rm_hint="claude-projects uninstall-shell && brew uninstall claude-projects"; else rm_hint="$(short "$CP_HOME")/uninstall.sh"; fi
+  printf '  %sProblems? claude projects doctor   ·   Remove: %s%s\n\n' "$D" "$rm_hint" "$R" >&2
 fi
 [ $MISSING_REQ = 1 ] && exit 1
 exit 0

@@ -3,17 +3,21 @@
 #   ./uninstall.sh           remove the shell hook, the command link and the installed files (keeps your config)
 #   ./uninstall.sh --purge   also delete your config
 #   ./uninstall.sh --yes     don't ask
+#   ./uninstall.sh --shell-only   only remove the shell hook (what `claude-projects uninstall-shell` runs)
+# Homebrew installs: files are left to `brew uninstall claude-projects`.
 
-YES=0; PURGE=0
+YES=0; PURGE=0; SHELL_ONLY=0
 for a in "$@"; do
   case "$a" in
-    -y|--yes) YES=1 ;; --purge) PURGE=1 ;;
-    -h|--help) sed -n '2,5p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -y|--yes) YES=1 ;; --purge) PURGE=1 ;; --shell-only) SHELL_ONLY=1; YES=1 ;;
+    -h|--help) sed -n '2,7p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown option: $a" >&2; exit 2 ;;
   esac
 done
 
 CP_HOME="${CP_HOME:-$HOME/.local/share/claude-projects}"
+BREW_MODE=0
+case "$(cd "$(dirname "$0")" && pwd -P)" in */Cellar/claude-projects/*/libexec) BREW_MODE=1; SHELL_ONLY=1 ;; esac
 CONF_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/claude-projects"
 LINK="$HOME/.local/bin/claude-projects"
 MARK_START="# >>> claude-projects >>>"
@@ -36,6 +40,12 @@ for rc in "${ZDOTDIR:-$HOME}/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile" "$HOM
   rm -f "$tmp"
   ok "removed the hook from $(short "$rc")  (backup: $(short "$rc").claude-projects.bak)"
 done
+
+if [ $SHELL_ONLY = 1 ]; then
+  [ $BREW_MODE = 1 ] && printf '  · the files belong to Homebrew — remove them with: brew uninstall claude-projects\n' >&2
+  printf '\nDone. Open a new terminal tab — or in this one run:  unset -f claude cproj 2>/dev/null\n' >&2
+  exit 0
+fi
 
 if [ -L "$LINK" ]; then rm -f "$LINK" && ok "removed $(short "$LINK")"; fi
 

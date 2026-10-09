@@ -170,4 +170,27 @@ check "blocks removed everywhere" '! grep -q claude-projects "$HOME/.zshrc" "$HO
 check "files removed, config kept" '[ ! -e "$HOME/.local/share/claude-projects" ] && [ ! -e "$HOME/.local/bin/claude-projects" ] && [ -f "$HOME/.config/claude-projects/config" ]'
 check "user lines untouched" 'grep -q "FOO=1" "$HOME/.bashrc" && grep -q "alias claude=" "$HOME/.zshrc"'
 
+echo "homebrew layout"
+# Mimic brew: Cellar/<name>/<ver>/libexec holds the files, opt/<name> -> Cellar/<name>/<ver>, bin/ links in.
+BR="$T/brew"; K="$BR/Cellar/claude-projects/1.0.0"
+mkdir -p "$K/libexec" "$K/bin" "$BR/opt" "$BR/bin" "$HOME/.local/bin"
+cp -R "$REPO/bin" "$REPO/shell" "$REPO/install.sh" "$REPO/uninstall.sh" "$K/libexec/"
+ln -s ../libexec/bin/claude-projects "$K/bin/claude-projects"
+ln -s ../Cellar/claude-projects/1.0.0 "$BR/opt/claude-projects"
+ln -s ../Cellar/claude-projects/1.0.0/bin/claude-projects "$BR/bin/claude-projects"
+ln -s "$HOME/.local/share/claude-projects/bin/claude-projects" "$HOME/.local/bin/claude-projects"   # left by a git install
+SHELL=/bin/zsh "$BR/bin/claude-projects" install-shell --yes --quiet --shell=zsh </dev/null >/dev/null 2>"$T/brew.log"
+BRP=$(cd "$BR" && pwd -P)
+check "install-shell hooks zsh via the stable opt/ path" 'grep -q "CP_HOME=\"$BRP/opt/claude-projects/libexec\"" "$HOME/.zshrc" && ! grep -q Cellar "$HOME/.zshrc" && grep -q "Remove with: claude-projects uninstall-shell" "$HOME/.zshrc"'
+check "brew mode copies nothing, drops the old git-install link" '[ ! -e "$HOME/.local/share/claude-projects" ] && [ ! -L "$HOME/.local/bin/claude-projects" ]'
+if command -v zsh >/dev/null 2>&1; then
+  W=$(cd "$T" && ZDOTDIR=$HOME zsh -c 'source ~/.zshrc; cproj version; claude projects update' 2>&1)
+  check "wrapper runs the brew copy; update says brew upgrade" 'printf "%s" "$W" | grep -q "claude-projects 1" && printf "%s" "$W" | grep -q "brew upgrade claude-projects"'
+fi
+check "doctor knows it's Homebrew" '"$BR/bin/claude-projects" doctor 2>&1 | grep -q "opt/claude-projects/libexec (Homebrew)"'
+"$BR/bin/claude-projects" uninstall-shell 2>/dev/null
+check "uninstall-shell removes the hook, leaves brew's files" '! grep -q claude-projects "$HOME/.zshrc" && [ -x "$K/libexec/bin/claude-projects" ]'
+"$K/libexec/uninstall.sh" --yes 2>/dev/null
+check "uninstall.sh inside brew never deletes brew's files" '[ -x "$K/libexec/bin/claude-projects" ]'
+
 echo; echo "$PASS passed, $FAIL failed"; [ $FAIL = 0 ]

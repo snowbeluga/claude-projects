@@ -3,7 +3,8 @@
 #   claude-projects            open the picker (prints "<key>\t<path>" for the shell wrapper)
 #   claude-projects setup      choose which folders to scan, editor, privacy
 #   claude-projects doctor     check everything and explain what's wrong
-#   claude-projects update     pull the latest version (git installs)
+#   claude-projects update     pull the latest version (git installs; Homebrew: brew upgrade)
+#   claude-projects install-shell | uninstall-shell   add/remove the rc-file line (Homebrew installs)
 #   claude-projects list | ignore | unignore | ignored   plain-text commands (see: help)
 #
 # Written for bash 3.2+ (the macOS default) and GNU/BSD userlands. Requires fzf; jq optional.
@@ -24,6 +25,12 @@ resolve_self() {
 }
 SELF=$(resolve_self)
 CP_HOME=$(dirname "$(dirname "$SELF")")
+# Homebrew keeps us in a versioned Cellar folder; rc files must point at the stable opt/ path
+# so they survive `brew upgrade`.
+IS_BREW=0; CP_HOME_STABLE=$CP_HOME
+case "$CP_HOME" in
+  */Cellar/claude-projects/*/libexec) IS_BREW=1; CP_HOME_STABLE="${CP_HOME%%/Cellar/*}/opt/claude-projects/libexec" ;;
+esac
 CONF_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/claude-projects"
 CONF="$CONF_DIR/config"
 IGNORE_FILE="$CONF_DIR/ignore"
@@ -673,7 +680,7 @@ doctor() {
   make_tmp
 
   printf '%s%s claude-projects doctor%s  %sv%s%s\n' "$O2$B" "$S_SPARK" "$R" "$GRY" "$CP_VERSION" "$R"
-  info "$(uname -sr) $S_DOT login shell ${SHELL:-?} $S_DOT bash $BASH_VERSION $S_DOT installed at $(shortpath "$CP_HOME")"
+  info "$(uname -sr) $S_DOT login shell ${SHELL:-?} $S_DOT bash $BASH_VERSION $S_DOT installed at $(shortpath "$CP_HOME_STABLE")$([ $IS_BREW = 1 ] && echo " (Homebrew)")"
 
   sect "Dependencies"
   if command -v fzf >/dev/null 2>&1; then
@@ -732,7 +739,10 @@ doctor() {
       warn "$(shortpath "$rc") defines its own claude() function — it may override this one"
     fi
   done
-  [ $found = 0 ] && bad "not hooked into any shell startup file — re-run install.sh"
+  if [ $found = 0 ]; then
+    if [ $IS_BREW = 1 ]; then bad "not hooked into any shell startup file — run: claude-projects install-shell"
+    else bad "not hooked into any shell startup file — re-run install.sh"; fi
+  fi
   case "${SHELL##*/}" in
     zsh|bash)
       out=$(ishell "${SHELL##*/}" 'type cproj; type claude; alias claude')
@@ -788,7 +798,9 @@ doctor() {
 
 # ---------------------------------------------------------------- update / help
 update() {
-  if [ -d "$CP_HOME/.git" ]; then
+  if [ $IS_BREW = 1 ]; then
+    say "Installed with Homebrew. Update with:  brew upgrade claude-projects"
+  elif [ -d "$CP_HOME/.git" ]; then
     say "Updating $(shortpath "$CP_HOME")…"
     git -C "$CP_HOME" pull --ff-only || die "git pull failed — resolve it in $CP_HOME and try again"
     "$CP_HOME/install.sh" --no-deps --no-setup --quiet
@@ -913,6 +925,8 @@ claude-projects $CP_VERSION — jump between projects and Claude Code sessions
   claude projects setup  choose folders, editor, privacy
   claude projects doctor check your install and explain problems
   claude projects update update to the latest version
+  claude-projects install-shell    add the line to ~/.zshrc / ~/.bashrc (needed once after brew install)
+  claude-projects uninstall-shell  remove that line again
 
 Plain-text commands (fine to run from scripts, or to ask Claude to run for you):
   claude-projects list [--all]                  every project: kind (git/folder), Claude used, last active
@@ -943,6 +957,8 @@ case "${1:-}" in
   setup)            make_tmp; _PREV_WRAP=$CP_WRAP_CLAUDE; setup ;;
   doctor)           plain_if_piped; doctor ;;
   update)           update ;;
+  install-shell)    shift; CP_HOME=$CP_HOME_STABLE exec "$CP_HOME/install.sh" --no-deps "$@" ;;
+  uninstall-shell)  shift; CP_HOME=$CP_HOME_STABLE exec "$CP_HOME/uninstall.sh" --shell-only "$@" ;;
   list)             shift; list_cmd "$@" ;;
   ignore)           shift; ignore_cmd "$@" ;;
   unignore)         shift; unignore_cmd "$@" ;;
